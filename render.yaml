@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: couch-arcade
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js

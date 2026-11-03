@@ -1,0 +1,9 @@
+{
+  "name": "couch-arcade",
+  "version": "1.0.0",
+  "description": "Party games on the big screen, played with up to 4 phones.",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "qrcode": "^1.5.4", "ws": "^8.18.0" },
+  "license": "MIT"
+}
