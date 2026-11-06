@@ -128,28 +128,55 @@
     const right = h('section', { class: 'lobbyr' },
       h('div', { class: 'slots' }, slots),
       start,
-      h('p', { class: 'hint' }, 'Phones 1 and 3 play on the left, phones 2 and 4 on the right. Slide your thumb to move, tap Lob, Drop or Smash when the shuttle is in your ring.'),
+      h('p', { class: 'hint' }, 'Phones 1 and 3 play on the left, phones 2 and 4 on the right. Slide your thumb to move, then swing your phone (down = smash, up = lob, flick = drop) or tap the buttons when the shuttle is near you.'),
       h('p', { class: 'hint' }, h('kbd', null, 'F'), ' fullscreen  ·  ', h('kbd', null, 'M'), ' mute  ·  ', h('kbd', null, 'Esc'), ' back to lobby'));
     return h('div', { class: 'lobby' }, left, right);
   }
 
   // ------------------------------------------------------------ Badminton
   const NETX = 500, NETH = 160, MINX = 40, MAXX = 960, REACH = 165, HIT_Y = 130;
-  const bd = { v: null, vt: 0, canvas: null, hud: null, over: null, hudSig: '', overSig: '', trail: [], parts: [], sm: {}, ev: 0, lastT: 0 };
+  const bd = { mode: '2d', r3: null, callout: null, v: null, vt: 0, canvas: null, hud: null, over: null, hudSig: '', overSig: '', trail: [], parts: [], sm: {}, ev: 0, lastT: 0 };
 
+  function webglOk() {
+    try { const c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch { return false; }
+  }
   function buildBadminton(v) {
+    if (bd.r3) { bd.r3.dispose(); bd.r3 = null; }
     bd.canvas = h('canvas', { class: 'bdcanvas' });
     bd.hud = h('div', { class: 'bdhud' });
     bd.over = h('div', { class: 'bdover' });
+    bd.callout = h('div', { class: 'callout' });
     bd.hudSig = ''; bd.overSig = ''; bd.trail = []; bd.parts = []; bd.sm = {}; bd.ev = v.ev ? v.ev.n : 0; bd.lastT = 0;
+    bd.mode = '2d';
+    const wrap = h('div', { class: 'bdwrap' }, bd.canvas, bd.hud, bd.over, bd.callout);
+    if (window.Court3D && webglOk()) {
+      bd.mode = '3d';
+      const cv = bd.canvas;
+      window.Court3D.create(cv).then((r) => {
+        if (bd.canvas === cv) bd.r3 = r; else r.dispose();
+      }).catch((err) => {
+        console.warn('3D court unavailable, using the flat court', err);
+        if (bd.canvas !== cv) return;
+        bd.mode = '2d';
+        bd.canvas = h('canvas', { class: 'bdcanvas' });
+        cv.replaceWith(bd.canvas);
+      });
+    }
     updateBadminton(v);
     requestAnimationFrame(loop);
-    return h('div', { class: 'stage bdstage' }, h('div', { class: 'bdwrap' }, bd.canvas, bd.hud, bd.over));
+    return h('div', { class: 'stage bdstage' }, wrap);
   }
 
   function updateBadminton(v) {
     bd.v = v; bd.vt = performance.now();
-    if (v.ev && v.ev.n !== bd.ev) { bd.ev = v.ev.n; burst(v.ev); }
+    if (v.ev && v.ev.n !== bd.ev) {
+      bd.ev = v.ev.n; burst(v.ev);
+      const word = { smash: 'SMASH!', lob: 'LOB', drop: 'DROP', net: 'NET!' }[v.ev.k];
+      if (word && bd.callout) {
+        bd.callout.textContent = word; bd.callout.className = 'callout ' + v.ev.k;
+        void bd.callout.offsetWidth; bd.callout.classList.add('go');
+      }
+    }
     const hs = JSON.stringify([v.teams, v.score, v.serving]);
     if (hs !== bd.hudSig) {
       bd.hudSig = hs;
@@ -172,6 +199,7 @@
   }
 
   function burst(e) {
+    if (bd.r3) { bd.r3.burst(e); if (e.k === 'net') bd.r3.netHit(); }
     const n = e.k === 'smash' ? 22 : e.k === 'point' ? 26 : 12;
     const col = e.k === 'smash' ? '#ffb347' : e.k === 'point' ? '#b8f35a' : e.k === 'net' ? '#9aa0c3' : '#ffffff';
     for (let i = 0; i < n; i++) {
@@ -182,16 +210,23 @@
 
   function loop(t) {
     const c = bd.canvas;
-    if (!c || !document.body.contains(c)) return;
+    if (!c || !document.body.contains(c)) {
+      if (bd.r3 && !document.body.contains(bd.canvas)) { bd.r3.dispose(); bd.r3 = null; }
+      return;
+    }
     requestAnimationFrame(loop);
     const v = bd.v;
     if (!v) return;
+    const dt = bd.lastT ? Math.min(0.05, (t - bd.lastT) / 1000) : 0.016;
+    bd.lastT = t;
+    if (bd.mode === '3d') {
+      if (bd.r3) bd.r3.frame(v, dt, Math.min(0.08, (performance.now() - bd.vt) / 1000));
+      return;
+    }
     const dpr = window.devicePixelRatio || 1;
     const r = c.getBoundingClientRect();
     const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
     if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
-    const dt = bd.lastT ? Math.min(0.05, (t - bd.lastT) / 1000) : 0.016;
-    bd.lastT = t;
     draw(c.getContext('2d'), W, H, v, dt);
   }
 

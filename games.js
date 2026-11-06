@@ -13,6 +13,7 @@ const REACH = 165, HIT_Y = 130;     // racket reach circle: centre (player x, HI
 const SPEED = 440, BOT_SPEED = 300;
 const WIN_TO = 11, CAP = 15;
 const SWING_CD = 0.38;
+const BUFFER_MS = 300;       // a swing waits this long for the shuttle to arrive
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const rnd = (a, b) => a + Math.random() * (b - a);
@@ -104,7 +105,7 @@ const badminton = {
     const T = timers();
     const actors = ctx.players.map((p, i) => ({
       id: p.id, name: p.name, color: p.color, team: i % 2, bot: false,
-      x: 0, tx: 0, cd: 0, req: null, swingEnd: 0, err: 0,
+      x: 0, tx: 0, cd: 0, req: null, reqAt: 0, swingEnd: 0, err: 0,
     }));
     for (const t of [0, 1]) {
       if (!actors.some((a) => a.team === t)) {
@@ -174,11 +175,15 @@ const badminton = {
       endPoint(loser);
     }
 
+    function canHit(a) {
+      const onSide = a.team === 0 ? sh.x <= NETX + 10 : sh.x >= NETX - 10;
+      return Math.hypot(sh.x - a.x, sh.y - HIT_Y) <= REACH && onSide && lastTeam !== a.team;
+    }
+
     function doSwing(a, kind) {
       a.cd = SWING_CD;
       a.swingEnd = Date.now() + 260;
-      const onSide = a.team === 0 ? sh.x <= NETX + 10 : sh.x >= NETX - 10;
-      if (Math.hypot(sh.x - a.x, sh.y - HIT_Y) <= REACH && onSide && lastTeam !== a.team) {
+      if (canHit(a)) {
         const dir = a.team === 0 ? 1 : -1;
         const s = pickShot(kind, sh.x, sh.y, dir);
         sh.vx = s.vx; sh.vy = s.vy;
@@ -198,6 +203,7 @@ const badminton = {
         if (a.cd <= 0 && onSide && Math.hypot(sh.x - a.x, sh.y - HIT_Y) <= REACH - 25 && Math.random() < 0.14) {
           const r = Math.random();
           a.req = sh.y > 150 && r < 0.35 ? 'smash' : r < 0.72 ? 'lob' : 'drop';
+          a.reqAt = Date.now();
         }
       } else a.tx = homeX(a);
     }
@@ -212,10 +218,16 @@ const badminton = {
         const sp = a.bot ? BOT_SPEED : SPEED;
         a.x += clamp(a.tx - a.x, -sp * dt, sp * dt);
       }
+      // Shot requests are buffered for a moment, so a swing that is a little early
+      // still connects as soon as the shuttle gets into reach.
       for (const a of actors) {
         if (!a.req) continue;
-        const k = a.req; a.req = null;
-        if (a.cd <= 0 && phase === 'rally' && sh.live) doSwing(a, k);
+        const age = now - a.reqAt;
+        if (phase !== 'rally' || !sh.live) { if (age > 250) a.req = null; continue; }
+        if (a.cd > 0) { if (age > 250) a.req = null; continue; }
+        const k = a.req;
+        if (canHit(a)) { a.req = null; doSwing(a, k); }
+        else if (age > BUFFER_MS) { a.req = null; a.cd = SWING_CD; a.swingEnd = now + 260; }
       }
       if (phase === 'rally' && sh.live) {
         let rem = dt;
@@ -253,7 +265,8 @@ const badminton = {
           const [lo, hi] = range(a.team);
           a.tx = lo + f * (hi - lo);
         } else if (m.k === 'shot' && (m.s === 'lob' || m.s === 'drop' || m.s === 'smash')) {
-          a.req = m.s;
+          if (a.req || a.cd > 0) return;
+          a.req = m.s; a.reqAt = Date.now(); a.swingEnd = Date.now() + 260;
         }
       },
       view(pid) {

@@ -129,44 +129,100 @@
 
 
   // ------------------------------------------------------------ Motion (swing the phone)
-  // Peak acceleration (m/s^2) decides the shot: soft flick = drop, medium = lob, hard = smash.
-  const SWING_MIN = 13, LOB_AT = 22, SMASH_AT = 36;
-  const motion = { on: false, listening: false, got: false, ui: null, cool: 0, tracking: false, t0: 0, peak: 0 };
+  // Direction of the first push of a swing picks the shot: down = smash, up = lob, flat flick = drop
+  // (a hard flat swing still smashes). Gravity is tracked so this works however the phone is held.
+  const SWING_MIN = 10, ROT_MIN = 320, TILT_RANGE = 25;
+  const motion = {
+    on: false, move: 'slide', listening: false, got: false, ui: null, liveUi: null, moveUi: null,
+    g: null, cool: 0, tracking: false, t0: 0, peak: 0, upSum: 0, mSum: 0, rotPeak: 0,
+    neutral: null, tiltF: 0.5, freeze: 0, lastTilt: -1, lastTiltT: 0, liveT: 0,
+  };
 
   function onMotion(e) {
-    const a = e.acceleration, g = e.accelerationIncludingGravity;
-    let m;
-    if (a && a.x != null) m = Math.hypot(a.x, a.y, a.z);
-    else if (g && g.x != null) m = Math.abs(Math.hypot(g.x, g.y, g.z) - 9.81);
+    const acc = e.acceleration, ag = e.accelerationIncludingGravity, rr = e.rotationRate;
+    if (ag && ag.x != null) {
+      if (!motion.g) motion.g = [ag.x, ag.y, ag.z];
+      else if (!motion.tracking) {
+        const k = 0.05;
+        motion.g = [motion.g[0] + (ag.x - motion.g[0]) * k, motion.g[1] + (ag.y - motion.g[1]) * k, motion.g[2] + (ag.z - motion.g[2]) * k];
+      }
+    }
+    let lin;
+    if (acc && acc.x != null) lin = [acc.x, acc.y, acc.z];
+    else if (ag && ag.x != null && motion.g) lin = [ag.x - motion.g[0], ag.y - motion.g[1], ag.z - motion.g[2]];
     else return;
     motion.got = true;
     if (!motion.on) return;
+    const m = Math.hypot(lin[0], lin[1], lin[2]);
+    const gn = motion.g ? Math.hypot(motion.g[0], motion.g[1], motion.g[2]) : 0;
+    const up = gn > 1 ? (lin[0] * motion.g[0] + lin[1] * motion.g[1] + lin[2] * motion.g[2]) / gn : 0;
+    const rot = rr ? Math.hypot(rr.alpha || 0, rr.beta || 0, rr.gamma || 0) : 0;
     const now = performance.now();
+    if (motion.liveUi && now - motion.liveT > 50) { motion.liveT = now; motion.liveUi(Math.max(m, rot / 12)); }
     if (now < motion.cool) return;
     if (!motion.tracking) {
-      if (m > SWING_MIN) { motion.tracking = true; motion.t0 = now; motion.peak = m; }
+      if (m > SWING_MIN || rot > ROT_MIN) {
+        motion.tracking = true; motion.t0 = now; motion.peak = m; motion.upSum = up; motion.mSum = m; motion.rotPeak = rot;
+        motion.sign0 = Math.sign(up); motion.dirOpen = true;
+      }
     } else {
-      motion.peak = Math.max(motion.peak, m);
-      if (now - motion.t0 > 90) {          // swing window over: classify by its peak
-        motion.tracking = false; motion.cool = now + 380;
-        swung(motion.peak);
+      const el = now - motion.t0;
+      if (m > motion.peak) motion.peak = m;
+      // the first push (until the acceleration changes direction) shows the intended swing direction
+      if (motion.dirOpen && el < 100) {
+        if (Math.sign(up) !== motion.sign0 && Math.abs(up) > 3) motion.dirOpen = false;
+        else { motion.upSum += up; motion.mSum += m; }
+      }
+      motion.rotPeak = Math.max(motion.rotPeak, rot);
+      if (el > 120 || (el > 50 && m < motion.peak * 0.45)) {
+        motion.tracking = false; motion.cool = now + 380; motion.freeze = now + 450;
+        const str = Math.max(motion.peak, motion.rotPeak / 12);
+        const r = motion.upSum / Math.max(1, motion.mSum);
+        let shot;
+        if (r < -0.3 && str >= 16) shot = 'smash';
+        else if (r > 0.3) shot = 'lob';
+        else if (str >= 34) shot = 'smash';
+        else if (str >= 20) shot = 'lob';
+        else shot = 'drop';
+        swung(shot, str);
       }
     }
   }
-  function swung(peak) {
-    const s = peak >= SMASH_AT ? 'smash' : peak >= LOB_AT ? 'lob' : 'drop';
+  function swung(s, str) {
     conn.send({ t: 'in', k: 'shot', s });
-    buzz(s === 'smash' ? 40 : 20);
-    if (motion.ui) motion.ui(s, peak);
+    buzz(s === 'smash' ? 45 : 22);
+    if (motion.ui) motion.ui(s, str);
+  }
+  function onOrient(e) {
+    if (!motion.on || motion.move !== 'tilt' || e.gamma == null) return;
+    const now = performance.now();
+    if (motion.neutral == null) motion.neutral = e.gamma;
+    if (now < motion.freeze || motion.tracking) return;
+    const f = Math.max(0, Math.min(1, 0.5 + (e.gamma - motion.neutral) / (2 * TILT_RANGE)));
+    motion.tiltF += (f - motion.tiltF) * 0.4;
+    if (Math.abs(motion.tiltF - motion.lastTilt) > 0.004 && now - motion.lastTiltT > 33) {
+      motion.lastTilt = motion.tiltF; motion.lastTiltT = now;
+      conn.send({ t: 'in', k: 'pos', f: Math.round(motion.tiltF * 1000) / 1000 });
+      if (motion.moveUi) motion.moveUi(motion.tiltF);
+    }
   }
   async function enableMotion() {
     try {
       if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
         if ((await DeviceMotionEvent.requestPermission()) !== 'granted') return 'denied';
+        try {
+          if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+            await DeviceOrientationEvent.requestPermission();
+          }
+        } catch { /* orientation is optional */ }
       }
     } catch { return 'denied'; }
-    if (!motion.listening) { addEventListener('devicemotion', onMotion); motion.listening = true; }
-    motion.on = true; motion.got = false;
+    if (!motion.listening) {
+      addEventListener('devicemotion', onMotion);
+      addEventListener('deviceorientation', onOrient);
+      motion.listening = true;
+    }
+    motion.on = true; motion.got = false; motion.g = null;
     await new Promise((r) => setTimeout(r, 1200));
     return motion.got ? 'ok' : 'nosensor';
   }
@@ -178,6 +234,7 @@
 
     // slide pad: your finger position maps to your position on your half of the court
     const thumb = h('i', { class: 'thumb' });
+    const padLabel = h('span', { class: 'padlabel' }, 'SLIDE TO MOVE');
     let lastSend = 0, f = 0.5;
     const send = (force) => {
       const n = performance.now();
@@ -189,46 +246,62 @@
       thumb.style.left = f * 100 + '%';
       send(false);
     };
+    const sliding = () => !(motion.on && motion.move === 'tilt');
     const pad = h('div', {
       class: 'movepad',
-      onpointerdown: (e) => { e.preventDefault(); pad.setPointerCapture(e.pointerId); pad.classList.add('on'); set(e); },
+      onpointerdown: (e) => { if (!sliding()) return; e.preventDefault(); pad.setPointerCapture(e.pointerId); pad.classList.add('on'); set(e); },
       onpointermove: (e) => { if (pad.classList.contains('on')) set(e); },
-      onpointerup: () => { pad.classList.remove('on'); send(true); },
+      onpointerup: () => { if (pad.classList.contains('on')) { pad.classList.remove('on'); send(true); } },
       onpointercancel: () => { pad.classList.remove('on'); send(true); },
-    }, h('span', { class: 'padlabel' }, 'Slide to move'), thumb);
+    }, padLabel, thumb);
 
     const shot = (s, label, hint, col) => h('button', {
       class: 'shotbtn', style: { '--c': col },
       onpointerdown: (e) => { e.preventDefault(); conn.send({ t: 'in', k: 'shot', s }); buzz(14); },
     }, h('b', null, label), h('small', null, hint));
     const buttons = h('div', { class: 'shots' },
-      shot('lob', 'Lob', 'high and deep', '#4cc9f0'),
-      shot('drop', 'Drop', 'soft by the net', '#b8f35a'),
-      shot('smash', 'Smash', 'fast and hard', '#ff5d73'));
+      shot('lob', 'LOB', 'high, deep', '#73eff7'),
+      shot('drop', 'DROP', 'soft, short', '#a7f070'),
+      shot('smash', 'SMASH', 'fast, hard', '#ef7d57'));
 
     // swing zone: shown instead of the buttons once motion controls are on
-    const swingText = h('b', null, 'Swing your phone like a racket');
-    const meter = h('i', { class: 'meterfill' });
+    const swingText = h('b', null, 'SWING YOUR PHONE');
+    const meter = h('i', { class: 'meterfill live' });
     const swing = h('div', { class: 'swingzone' }, swingText, h('div', { class: 'meter' }, meter),
-      h('small', null, 'Soft flick = drop, swing = lob, hard swing = smash'));
+      h('small', null, 'Swing down = smash, swing up = lob, flick = drop'));
     const note = h('p', { class: 'motionnote' });
-    const modeBtn = h('button', { class: 'modebtn' }, '');
+    const modeBtn = h('button', { class: 'modebtn' });
+    const moveBtn = h('button', { class: 'modebtn' });
+    const calBtn = h('button', { class: 'modebtn' }, 'RECENTER');
     const slot = h('div', { class: 'shotslot' });
+    const modes = h('div', { class: 'modes' });
+    let holdUntil = 0;
     const paint = () => {
       slot.replaceChildren(motion.on ? swing : buttons);
-      modeBtn.textContent = motion.on ? 'Use buttons instead' : 'Use motion controls';
+      modeBtn.textContent = motion.on ? 'USE BUTTONS' : 'USE MOTION';
+      moveBtn.textContent = 'MOVE: ' + (motion.move === 'tilt' ? 'TILT' : 'THUMB');
+      const tilt = motion.on && motion.move === 'tilt';
+      pad.classList.toggle('tilt', tilt);
+      padLabel.textContent = tilt ? 'TILT PHONE LEFT / RIGHT TO MOVE' : 'SLIDE TO MOVE';
+      modes.replaceChildren(modeBtn, ...(motion.on ? [moveBtn] : []), ...(tilt ? [calBtn] : []));
       if (motion.on) {
-        motion.ui = (s, peak) => {
+        motion.ui = (s, str) => {
           swingText.textContent = s.toUpperCase() + '!';
-          meter.style.width = Math.min(100, (peak / 50) * 100) + '%';
+          meter.style.width = Math.min(100, (str / 50) * 100) + '%'; meter.className = 'meterfill';
+          holdUntil = performance.now() + 700;
           swing.classList.remove('hit'); void swing.offsetWidth; swing.classList.add('hit');
         };
-      } else motion.ui = null;
+        motion.liveUi = (m) => {
+          if (performance.now() < holdUntil) return;
+          meter.className = 'meterfill live'; meter.style.width = Math.min(100, (m / 50) * 100) + '%';
+        };
+        motion.moveUi = (ff) => { thumb.style.left = ff * 100 + '%'; };
+      } else { motion.ui = null; motion.liveUi = null; motion.moveUi = null; }
     };
     modeBtn.addEventListener('click', async () => {
       if (motion.on) { motion.on = false; note.textContent = ''; paint(); return; }
       if (!window.isSecureContext) {
-        note.textContent = 'Phone sensors only work on a secure link (https). See the README: run "npm run start:https" or use a tunnel.';
+        note.textContent = 'Phone sensors need a secure (https) link. Run npm run start:https, or see the README.';
         return;
       }
       note.textContent = 'Checking motion sensor...';
@@ -240,9 +313,13 @@
           : 'No motion data received. Use the buttons, or try another browser.';
       }
     });
+    moveBtn.addEventListener('click', () => {
+      motion.move = motion.move === 'tilt' ? 'slide' : 'tilt'; motion.neutral = null; paint();
+    });
+    calBtn.addEventListener('click', () => { motion.neutral = null; buzz(15); });
     paint();
 
-    return frame(v, [score, status, pad, slot, modeBtn, note], 'bdframe');
+    return frame(v, [score, status, pad, slot, modes, note], 'bdframe');
   }
 
   function matchOver(v) {

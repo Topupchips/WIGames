@@ -1,6 +1,6 @@
 # Badminton Night
 
-Doubles badminton on your monitor, played with up to 4 phones.
+Pixel-art 3D doubles badminton on your monitor, played with up to 4 phones.
 
 ## Run it
     npm install
@@ -12,7 +12,7 @@ Phones on the same Wi-Fi scan the QR code, or open the address shown under it an
 ## How to play
 - 2 to 4 phones: phones 1 and 3 play on the left, phones 2 and 4 on the right. One phone plays the CPU.
 - Slide your thumb on the pad to move. Tap Lob, Drop or Smash when the shuttle is inside your dashed ring.
-- Motion controls: tap "Use motion controls" on your phone, then swing it like a racket. A soft flick is a drop, a swing is a lob, a hard swing is a smash. Keep sliding your thumb on the pad to move.
+- Motion controls: tap USE MOTION on your phone, then swing it like a racket. Swing down for a smash, swing up for a lob, a quick flick for a drop. Slide your thumb to move, or switch to MOVE: TILT and tilt the phone left and right (RECENTER sets your neutral position).
 - Rally scoring, first to 11 and win by 2 (cap 15). Hitting the net or landing out loses the point.
 - Enter starts the match, Esc returns to the lobby, F is fullscreen, M mutes.
 
