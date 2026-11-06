@@ -1,6 +1,6 @@
-# Couch Arcade
+# Badminton Night
 
-Party games on your monitor, played with up to 4 phones.
+Doubles badminton on your monitor, played with up to 4 phones.
 
 ## Run it
     npm install
@@ -9,19 +9,14 @@ Party games on your monitor, played with up to 4 phones.
 Open http://localhost:3000 on the laptop and put it on the monitor (press F for fullscreen).
 Phones on the same Wi-Fi scan the QR code, or open the address shown under it and type the room code.
 
-## Controls on the big screen
-- 1 to 4: start a game (the first phone that joined can also pick from their phone)
-- Enter: back to lobby from the results, Esc: abort a game
-- F: fullscreen, M: mute
-
-## Games
-Tap Frenzy, Quick Draw, Trivia Blitz, Memory Pads. Points carry across games (5/3/2/1 by rank).
-
-## Adding a game
-Add an object to games.js (id, name, tag, min, create) and a renderer in public/host.js and public/play.js.
+## How to play
+- 2 to 4 phones: phones 1 and 3 play on the left, phones 2 and 4 on the right. One phone plays the CPU.
+- Slide your thumb on the pad to move. Tap Lob, Drop or Smash when the shuttle is inside your dashed ring.
+- Rally scoring, first to 11 and win by 2 (cap 15). Hitting the net or landing out loses the point.
+- Enter starts the match, Esc returns to the lobby, F is fullscreen, M mutes.
 
 ## Notes
-- If phones cannot connect, allow Node through the laptop firewall, and make sure the Wi-Fi does not isolate clients (some guest networks do).
+- If phones cannot connect, allow Node through the laptop firewall, and make sure the Wi-Fi does not isolate clients.
 - Set PUBLIC_URL=https://your-host to override the address encoded in the QR code (for hosting online).
 
 ## Playing online with friends in other places

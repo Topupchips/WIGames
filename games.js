@@ -1,21 +1,21 @@
 'use strict';
-// Game modules. Each game has: id, name, tag, min (min players), create(ctx).
-// create(ctx) returns { start(), input(pid, msg), view(pid), stop() }.
-// ctx = { players:[{id,name,color}], push(), finish({scores, labels}) }.
-// view(pid) is called with null for the big screen. Times are sent as `ms`
-// (remaining in the current phase) and `dur` (phase length) so clients can
-// animate countdowns without clock sync.
+// Badminton. Server-authoritative physics at 60 Hz.
+// World units: x 0..1000 (left to right), y 0..~500 (up from the floor). Net at x=500.
+// Team 0 plays on the left, team 1 on the right. Phones slide to move and tap a shot
+// (lob, drop, smash) when the shuttle is in reach; the server aims the shot.
 
 const SCALE = Number(process.env.TIME_SCALE) || 1; // only used by tests
 
-const shuffle = (a) => {
-  a = a.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-};
+const NETX = 500, NETH = 160;
+const G = 900, K = 0.0036;          // gravity and shuttle drag (quadratic)
+const MINX = 40, MAXX = 960;        // court boundary (in bounds)
+const REACH = 165, HIT_Y = 130;     // racket reach circle: centre (player x, HIT_Y)
+const SPEED = 440, BOT_SPEED = 300;
+const WIN_TO = 11, CAP = 15;
+const SWING_CD = 0.38;
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rnd = (a, b) => a + Math.random() * (b - a);
 
 function timers() {
   const set = new Set();
@@ -30,315 +30,257 @@ function timers() {
       set.add(id);
       return id;
     },
-    cancel(id) { clearTimeout(id); set.delete(id); },
     cancelAll() { for (const id of set) { clearTimeout(id); clearInterval(id); } set.clear(); },
   };
 }
 
-// ---------------------------------------------------------------- Tap Frenzy
-const tap = {
-  id: 'tap', name: 'Tap Frenzy', tag: 'Smash your screen for 10 seconds', min: 1,
-  create(ctx) {
-    const T = timers();
-    const DURATION = 10000;
-    const taps = {};
-    ctx.players.forEach((p) => { taps[p.id] = 0; });
-    let phase = 'countdown', until = 0, dur = 3000;
-
-    function finish() {
-      const scores = {}, labels = {};
-      for (const p of ctx.players) { scores[p.id] = taps[p.id]; labels[p.id] = `${taps[p.id]} taps`; }
-      ctx.finish({ scores, labels });
+// Forward-simulate a shot until it lands. Returns landing x, whether it clears the net, apex.
+function flight(x, y, vx, vy) {
+  const dt = 1 / 60;
+  let clear = true, apex = y, t = 0;
+  while (y > 0 && t < 8) {
+    const sp = Math.hypot(vx, vy);
+    vx -= K * sp * vx * dt;
+    vy -= (G + K * sp * vy) * dt;
+    const nx = x + vx * dt, ny = y + vy * dt;
+    if ((x - NETX) * (nx - NETX) < 0) {
+      const yy = y + (ny - y) * ((NETX - x) / (nx - x));
+      if (yy < NETH + 6) clear = false;
     }
-    return {
-      start() {
-        until = Date.now() + 3000;
-        ctx.push();
-        T.after(3000, () => {
-          phase = 'play'; dur = DURATION; until = Date.now() + DURATION;
-          ctx.push();
-          T.every(120, () => ctx.push());
-          T.after(DURATION, () => {
-            T.cancelAll();
-            phase = 'done'; dur = 1; until = Date.now();
-            ctx.push();
-            T.after(2000, finish);
-          });
-        });
-      },
-      input(pid) { if (phase === 'play' && pid in taps) taps[pid]++; },
-      view() {
-        return {
-          game: 'tap', phase, ms: Math.max(0, until - Date.now()), dur,
-          ps: ctx.players.map((p) => ({ id: p.id, name: p.name, color: p.color, taps: taps[p.id] })),
-        };
-      },
-      stop() { T.cancelAll(); },
-    };
-  },
-};
+    x = nx; y = ny; t += dt;
+    if (y > apex) apex = y;
+  }
+  return { x, clear, apex, t };
+}
 
-// ---------------------------------------------------------------- Quick Draw
-const reflex = {
-  id: 'reflex', name: 'Quick Draw', tag: 'Wait for it, then tap first', min: 1,
+// Find the launch speed at a given angle that lands the shuttle on targetX.
+function solve(x0, y0, dir, angDeg, targetX) {
+  const a = (angDeg * Math.PI) / 180;
+  const want = Math.abs(targetX - x0);
+  let lo = 120, hi = 2600;
+  for (let i = 0; i < 22; i++) {
+    const s = (lo + hi) / 2;
+    const r = flight(x0, y0, dir * Math.cos(a) * s, Math.sin(a) * s);
+    if (dir * (r.x - x0) < want) lo = s; else hi = s;
+  }
+  const s = (lo + hi) / 2;
+  const vx = dir * Math.cos(a) * s, vy = Math.sin(a) * s;
+  return { vx, vy, s, r: flight(x0, y0, vx, vy), want };
+}
+
+function pickShot(kind, x0, y0, dir) {
+  const deep = dir > 0 ? rnd(820, 920) : rnd(80, 180);
+  const near = dir > 0 ? rnd(565, 625) : rnd(375, 435);
+  const mid = dir > 0 ? rnd(660, 790) : rnd(210, 340);
+  let plans;
+  if (kind === 'lob') plans = [[56, deep], [62, deep], [50, deep], [68, deep]];
+  else if (kind === 'drop') plans = [[38, near], [48, near], [58, near], [68, near]];
+  else if (y0 >= HIT_Y + 10) plans = [[-18, mid], [-10, mid], [-2, mid], [8, mid], [16, mid]];
+  else {
+    const t = mid + (dir > 0 ? 60 : -60);
+    plans = [[10, t], [18, t], [26, t], [34, t]]; // too low to smash: flat drive
+  }
+  for (const [a, t] of plans) {
+    const o = solve(x0, y0, dir, a, t);
+    if (o.r.clear && o.s < 2500 && o.r.apex < 520 && Math.abs(dir * (o.r.x - x0) - o.want) < 30) {
+      return { vx: o.vx, vy: o.vy };
+    }
+  }
+  // Could not reach the target (e.g. hit from the back corner): lob as far as is safe.
+  for (const t of dir > 0 ? [780, 700, 620, 570] : [220, 300, 380, 430]) {
+    for (const a of [62, 72, 52, 80]) {
+      const o = solve(x0, y0, dir, a, t);
+      if (o.r.clear && o.s < 2500 && o.r.apex < 520 && dir * (o.r.x - NETX) > 30) return { vx: o.vx, vy: o.vy };
+    }
+  }
+  const o = solve(x0, y0, dir, 75, dir > 0 ? 600 : 400);
+  return { vx: o.vx, vy: o.vy };
+}
+
+const badminton = {
+  id: 'badminton', name: 'Badminton', min: 1,
+  tag: 'Doubles with up to 4 phones, or 1 phone against the CPU',
   create(ctx) {
     const T = timers();
-    const ROUNDS = 5;
-    const wins = {}, times = {};
-    ctx.players.forEach((p) => { wins[p.id] = 0; times[p.id] = []; });
-    let round = 0, phase = 'intro', until = 0, dur = 0, goAt = 0;
-    let locked = new Set(), winner = null, goTimer = null, waitTimer = null;
+    const actors = ctx.players.map((p, i) => ({
+      id: p.id, name: p.name, color: p.color, team: i % 2, bot: false,
+      x: 0, tx: 0, cd: 0, req: null, swingEnd: 0, err: 0,
+    }));
+    for (const t of [0, 1]) {
+      if (!actors.some((a) => a.team === t)) {
+        actors.push({ id: 'cpu' + t, name: 'CPU', color: '#9aa0c3', team: t, bot: true, x: 0, tx: 0, cd: 0, req: null, swingEnd: 0, err: 0 });
+      }
+    }
+    const teamActors = (t) => actors.filter((a) => a.team === t);
+    const names = [0, 1].map((t) => teamActors(t).map((a) => a.name).join(' & '));
+    const homeX = (a) => {
+      const i = teamActors(a.team).indexOf(a);
+      return a.team === 0 ? 230 + i * 120 : 770 - i * 120;
+    };
+    const range = (t) => (t === 0 ? [MINX, NETX - 40] : [NETX + 40, MAXX]);
+    actors.forEach((a) => { a.x = a.tx = homeX(a); });
 
-    const setPhase = (ph, ms) => { phase = ph; until = Date.now() + ms; dur = ms; };
+    const sh = { x: 230, y: 280, vx: 0, vy: 0, live: false };
+    const score = [0, 0];
+    let phase = 'intro', until = 0, dur = 0, serving = 0, rally = 0, banner = '';
+    let lastTeam = null, pred = null, predTeam = null, evn = 0, ev = { n: 0, k: '', x: 0, y: 0 };
+    let last = Date.now(), tickN = 0;
 
-    function next() {
-      round++;
-      if (round > ROUNDS) return finish();
-      locked = new Set(); winner = null;
-      setPhase('intro', 1600); ctx.push();
-      T.after(1600, () => {
-        const d = 1800 + Math.random() * 3600;
-        setPhase('wait', d); ctx.push();
-        waitTimer = T.after(d, go);
+    const setPhase = (p, ms) => { phase = p; until = Date.now() + ms; dur = ms; };
+
+    function beginServe(team) {
+      serving = team; rally = 0; lastTeam = null; pred = null;
+      actors.forEach((a) => { a.x = a.tx = homeX(a); a.cd = 0; a.req = null; });
+      sh.x = team === 0 ? 230 : 770; sh.y = 280; sh.vx = sh.vy = 0; sh.live = false;
+      banner = `${names[team]} to serve`;
+      setPhase('serve', 1300);
+      ctx.push();
+      T.after(1300, () => {
+        if (phase !== 'serve') return;
+        phase = 'rally'; sh.live = true; until = Date.now(); dur = 1;
+        ctx.push();
       });
     }
-    function go() {
-      goAt = Date.now();
-      setPhase('go', 3000); ctx.push();
-      goTimer = T.after(3000, endRound);
+
+    function endPoint(loser) {
+      if (phase !== 'rally') return;
+      const win = 1 - loser;
+      score[win]++;
+      sh.live = false; sh.vx = sh.vy = 0; sh.y = Math.max(0, sh.y);
+      ev = { n: ++evn, k: 'point', x: sh.x, y: 0 };
+      const over = (score[win] >= WIN_TO && score[win] - score[loser] >= 2) || score[win] >= CAP;
+      banner = over ? `${names[win]} win!` : `${names[win]} score`;
+      setPhase(over ? 'over' : 'point', over ? 3800 : 1900);
+      ctx.push();
+      T.after(over ? 3800 : 1900, () => (over ? finish(win) : beginServe(win)));
     }
-    function endRound() {
-      if (phase === 'result') return;
-      T.cancel(goTimer); T.cancel(waitTimer);
-      setPhase('result', 2600); ctx.push();
-      T.after(2600, next);
-    }
-    function finish() {
+
+    function finish(win) {
       const scores = {}, labels = {};
-      for (const p of ctx.players) {
-        const t = times[p.id];
-        const avg = t.length ? Math.round(t.reduce((a, b) => a + b, 0) / t.length) : 0;
-        scores[p.id] = wins[p.id] + (wins[p.id] ? Math.max(0, 3000 - avg) / 1e6 : 0);
-        labels[p.id] = `${wins[p.id]} ${wins[p.id] === 1 ? 'win' : 'wins'}` + (wins[p.id] ? ` · avg ${avg} ms` : '');
+      for (const a of actors) {
+        if (a.bot) continue;
+        const won = a.team === win;
+        scores[a.id] = won ? 100 + score[a.team] : 0;
+        labels[a.id] = `${won ? 'Won' : 'Lost'} ${score[a.team]}-${score[1 - a.team]}`;
       }
       ctx.finish({ scores, labels });
     }
-    return {
-      start() { next(); },
-      input(pid) {
-        if (!(pid in wins) || locked.has(pid)) return;
-        if (phase === 'wait') {
-          locked.add(pid); ctx.push();
-          if (locked.size >= ctx.players.length) endRound();
-        } else if (phase === 'go') {
-          const ms = Date.now() - goAt;
-          winner = { id: pid, ms }; wins[pid]++; times[pid].push(ms);
-          endRound();
+
+    function landed() {
+      const x = sh.x;
+      let loser;
+      if (x < MINX || x > MAXX) loser = lastTeam !== null ? lastTeam : (x < NETX ? 0 : 1);
+      else loser = x < NETX ? 0 : 1;
+      endPoint(loser);
+    }
+
+    function doSwing(a, kind) {
+      a.cd = SWING_CD;
+      a.swingEnd = Date.now() + 260;
+      const onSide = a.team === 0 ? sh.x <= NETX + 10 : sh.x >= NETX - 10;
+      if (Math.hypot(sh.x - a.x, sh.y - HIT_Y) <= REACH && onSide && lastTeam !== a.team) {
+        const dir = a.team === 0 ? 1 : -1;
+        const s = pickShot(kind, sh.x, sh.y, dir);
+        sh.vx = s.vx; sh.vy = s.vy;
+        lastTeam = a.team; rally++;
+        pred = flight(sh.x, sh.y, sh.vx, sh.vy).x; predTeam = 1 - a.team;
+        teamActors(1 - a.team).forEach((o) => { o.err = rnd(-110, 110); });
+        ev = { n: ++evn, k: kind, x: sh.x, y: sh.y };
+      }
+    }
+
+    function botThink(a) {
+      const [lo, hi] = range(a.team);
+      if (phase === 'rally' && sh.live && lastTeam !== a.team) {
+        const target = pred !== null && predTeam === a.team ? pred + a.err : sh.x;
+        a.tx = clamp(target, lo, hi);
+        const onSide = a.team === 0 ? sh.x <= NETX : sh.x >= NETX;
+        if (a.cd <= 0 && onSide && Math.hypot(sh.x - a.x, sh.y - HIT_Y) <= REACH - 25 && Math.random() < 0.14) {
+          const r = Math.random();
+          a.req = sh.y > 150 && r < 0.35 ? 'smash' : r < 0.72 ? 'lob' : 'drop';
         }
-      },
-      view() {
-        return {
-          game: 'reflex', phase, ms: Math.max(0, until - Date.now()), dur, round, rounds: ROUNDS,
-          locked: [...locked], winner,
-          ps: ctx.players.map((p) => ({ id: p.id, name: p.name, color: p.color, wins: wins[p.id] })),
-        };
-      },
-      stop() { T.cancelAll(); },
-    };
-  },
-};
-
-// -------------------------------------------------------------- Trivia Blitz
-const BANK = [
-  { q: 'Which planet is known as the Red Planet?', a: ['Venus', 'Mars', 'Jupiter', 'Mercury'], c: 1 },
-  { q: 'What is the largest ocean on Earth?', a: ['Atlantic', 'Indian', 'Pacific', 'Arctic'], c: 2 },
-  { q: 'How many sides does a hexagon have?', a: ['5', '6', '7', '8'], c: 1 },
-  { q: 'Which element has the chemical symbol Au?', a: ['Silver', 'Gold', 'Iron', 'Copper'], c: 1 },
-  { q: 'Who painted the Mona Lisa?', a: ['Michelangelo', 'Raphael', 'Leonardo da Vinci', 'Van Gogh'], c: 2 },
-  { q: 'What is the capital of Canada?', a: ['Toronto', 'Ottawa', 'Montreal', 'Vancouver'], c: 1 },
-  { q: 'Which is the largest mammal?', a: ['African elephant', 'Giraffe', 'Blue whale', 'Orca'], c: 2 },
-  { q: 'In what year did the Titanic sink?', a: ['1905', '1912', '1920', '1931'], c: 1 },
-  { q: 'What is the hardest natural substance?', a: ['Quartz', 'Steel', 'Diamond', 'Topaz'], c: 2 },
-  { q: 'Which planet has the most prominent rings?', a: ['Saturn', 'Mars', 'Earth', 'Mercury'], c: 0 },
-  { q: 'At sea level, water boils at how many degrees Celsius?', a: ['90', '100', '110', '120'], c: 1 },
-  { q: 'Who wrote Romeo and Juliet?', a: ['Charles Dickens', 'Jane Austen', 'William Shakespeare', 'Mark Twain'], c: 2 },
-  { q: 'Which country gave the Statue of Liberty to the United States?', a: ['France', 'England', 'Spain', 'Italy'], c: 0 },
-  { q: 'What is the smallest prime number?', a: ['0', '1', '2', '3'], c: 2 },
-  { q: 'Which gas do plants absorb for photosynthesis?', a: ['Oxygen', 'Nitrogen', 'Carbon dioxide', 'Helium'], c: 2 },
-  { q: 'Which animal is called the ship of the desert?', a: ['Horse', 'Camel', 'Llama', 'Donkey'], c: 1 },
-  { q: 'How many bones does an adult human have?', a: ['156', '206', '256', '306'], c: 1 },
-  { q: 'On which continent is the Sahara Desert?', a: ['Asia', 'South America', 'Africa', 'Australia'], c: 2 },
-  { q: 'What does CPU stand for?', a: ['Central Processing Unit', 'Computer Power Unit', 'Core Program Utility', 'Central Program Usage'], c: 0 },
-  { q: 'What is the tallest mountain above sea level?', a: ['K2', 'Kilimanjaro', 'Mount Everest', 'Denali'], c: 2 },
-  { q: 'How many strings does a standard guitar have?', a: ['4', '5', '6', '8'], c: 2 },
-  { q: 'What is the chemical formula for water?', a: ['CO2', 'H2O', 'O2', 'NaCl'], c: 1 },
-  { q: 'Which two provinces border the Bay of Fundy?', a: ['New Brunswick and Nova Scotia', 'PEI and Newfoundland', 'Quebec and Ontario', 'Nova Scotia and PEI'], c: 0 },
-  { q: 'What is the largest planet in our solar system?', a: ['Saturn', 'Neptune', 'Jupiter', 'Earth'], c: 2 },
-  { q: 'Which company created the iPhone?', a: ['Samsung', 'Apple', 'Nokia', 'Google'], c: 1 },
-  { q: 'What is the square root of 144?', a: ['10', '11', '12', '14'], c: 2 },
-  { q: 'Which is the largest country by land area?', a: ['Canada', 'China', 'United States', 'Russia'], c: 3 },
-  { q: 'The Python language is named after which comedy group?', a: ['Monty Python', 'The Goodies', 'Blackadder', 'The Two Ronnies'], c: 0 },
-  { q: 'What does HTML stand for?', a: ['HyperText Markup Language', 'High Tech Modern Language', 'Home Tool Markup Language', 'HyperTransfer Make Language'], c: 0 },
-  { q: 'How many minutes are in a day?', a: ['1,240', '1,440', '1,640', '2,400'], c: 1 },
-  { q: 'Which planet is closest to the Sun?', a: ['Venus', 'Earth', 'Mercury', 'Mars'], c: 2 },
-  { q: 'Which ocean lies between Africa and Australia?', a: ['Atlantic', 'Indian', 'Pacific', 'Arctic'], c: 1 },
-];
-
-const trivia = {
-  id: 'trivia', name: 'Trivia Blitz', tag: '8 questions, faster answers score more', min: 1,
-  create(ctx) {
-    const T = timers();
-    const N = 8, QTIME = 15000, REVEAL = 4200;
-    const qs = shuffle(BANK).slice(0, N).map((q) => {
-      const opts = shuffle(q.a.map((t, i) => ({ t, ok: i === q.c })));
-      return { q: q.q, opts: opts.map((o) => o.t), c: opts.findIndex((o) => o.ok) };
-    });
-    const score = {};
-    ctx.players.forEach((p) => { score[p.id] = 0; });
-    let i = -1, phase = 'intro', until = 0, dur = 0, answers = {}, gained = {}, qTimer = null;
-
-    function next() {
-      i++;
-      if (i >= N) return finish();
-      answers = {}; gained = {};
-      phase = 'question'; until = Date.now() + QTIME; dur = QTIME;
-      ctx.push();
-      qTimer = T.after(QTIME, reveal);
+      } else a.tx = homeX(a);
     }
-    function reveal() {
-      if (phase !== 'question') return;
-      T.cancel(qTimer);
-      phase = 'reveal'; until = Date.now() + REVEAL; dur = REVEAL;
-      ctx.push();
-      T.after(REVEAL, next);
+
+    function tick() {
+      const now = Date.now();
+      const dt = SCALE === 1 ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+      last = now;
+      for (const a of actors) {
+        a.cd = Math.max(0, a.cd - dt);
+        if (a.bot) botThink(a);
+        const sp = a.bot ? BOT_SPEED : SPEED;
+        a.x += clamp(a.tx - a.x, -sp * dt, sp * dt);
+      }
+      for (const a of actors) {
+        if (!a.req) continue;
+        const k = a.req; a.req = null;
+        if (a.cd <= 0 && phase === 'rally' && sh.live) doSwing(a, k);
+      }
+      if (phase === 'rally' && sh.live) {
+        let rem = dt;
+        while (rem > 1e-6 && phase === 'rally') {
+          const h = Math.min(rem, 1 / 60); rem -= h;
+          const sp = Math.hypot(sh.vx, sh.vy);
+          sh.vx -= K * sp * sh.vx * h;
+          sh.vy -= (G + K * sp * sh.vy) * h;
+          const nx = sh.x + sh.vx * h, ny = sh.y + sh.vy * h;
+          if ((sh.x - NETX) * (nx - NETX) < 0 &&
+              sh.y + (ny - sh.y) * ((NETX - sh.x) / (nx - sh.x)) < NETH) {
+            const side = sh.x < NETX ? -1 : 1;
+            sh.x = NETX + side * 3; sh.vx = -sh.vx * 0.12; sh.vy = Math.min(sh.vy, 0) * 0.3;
+            ev = { n: ++evn, k: 'net', x: NETX, y: sh.y };
+          } else { sh.x = nx; sh.y = ny; }
+          if (sh.y <= 0) { sh.y = 0; landed(); break; }
+          if (sh.x < -200 || sh.x > 1200) { landed(); break; }
+        }
+      }
+      if (++tickN % 2 === 0) ctx.push();
     }
-    function finish() {
-      const labels = {};
-      for (const p of ctx.players) labels[p.id] = `${score[p.id]} pts`;
-      ctx.finish({ scores: score, labels });
-    }
+
     return {
       start() {
-        phase = 'intro'; until = Date.now() + 2500; dur = 2500;
+        setPhase('intro', 3000);
         ctx.push();
-        T.after(2500, next);
+        T.every(1000 / 60, tick);
+        T.after(3000, () => beginServe(0));
       },
       input(pid, m) {
-        if (phase !== 'question' || !(pid in score) || pid in answers) return;
-        const c = Number(m.choice);
-        if (!(c >= 0 && c < 4)) return;
-        const left = Math.max(0, until - Date.now());
-        answers[pid] = c;
-        if (c === qs[i].c) {
-          const g = 100 + Math.round((100 * left) / QTIME);
-          gained[pid] = g; score[pid] += g;
-        } else gained[pid] = 0;
-        ctx.push();
-        if (Object.keys(answers).length >= ctx.players.length) reveal();
+        const a = actors.find((x) => x.id === pid);
+        if (!a || a.bot) return;
+        if (m.k === 'pos') {
+          const f = clamp(Number(m.f) || 0, 0, 1);
+          const [lo, hi] = range(a.team);
+          a.tx = lo + f * (hi - lo);
+        } else if (m.k === 'shot' && (m.s === 'lob' || m.s === 'drop' || m.s === 'smash')) {
+          a.req = m.s;
+        }
       },
       view(pid) {
         const v = {
-          game: 'trivia', phase, ms: Math.max(0, until - Date.now()), dur, n: i + 1, total: N,
-          ps: ctx.players.map((p) => ({
-            id: p.id, name: p.name, color: p.color, score: score[p.id], answered: p.id in answers,
-          })),
+          game: 'badminton', phase, ms: Math.max(0, until - Date.now()), dur,
+          score: score.slice(), serving, target: WIN_TO, banner, teams: names,
         };
-        if (phase === 'question' || phase === 'reveal') {
-          v.q = qs[i].q; v.opts = qs[i].opts;
-          v.choice = pid != null && pid in answers ? answers[pid] : null;
+        if (pid != null) {
+          const me = actors.find((a) => a.id === pid);
+          v.team = me ? me.team : 0;
+          return v;
         }
-        if (phase === 'reveal') { v.correct = qs[i].c; v.answers = answers; v.gained = gained; }
+        const now = Date.now();
+        v.rally = rally; v.last = lastTeam; v.ev = ev;
+        v.sh = { x: Math.round(sh.x * 10) / 10, y: Math.round(sh.y * 10) / 10, vx: Math.round(sh.vx), vy: Math.round(sh.vy) };
+        v.actors = actors.map((a) => ({
+          id: a.id, name: a.name, color: a.color, team: a.team, bot: a.bot,
+          x: Math.round(a.x), sw: Math.max(0, (a.swingEnd - now) / 260),
+        }));
         return v;
       },
       stop() { T.cancelAll(); },
+      _debug: { flight, solve, pickShot, actors, sh, tick },
     };
   },
 };
 
-// --------------------------------------------------------------- Memory Pads
-const simon = {
-  id: 'simon', name: 'Memory Pads', tag: 'Watch the pattern, repeat it, last one standing', min: 1,
-  create(ctx) {
-    const T = timers();
-    const MAXR = 14;
-    const solo = ctx.players.length === 1;
-    const seq = [];
-    const prog = {}, status = {}, score = {};
-    ctx.players.forEach((p) => { prog[p.id] = 0; status[p.id] = 'alive'; score[p.id] = 0; });
-    let round = 0, phase = 'intro', until = 0, dur = 0, lit = -1, inputTimer = null;
-
-    const alive = () => ctx.players.filter((p) => status[p.id] === 'alive');
-
-    function next() {
-      round++;
-      seq.push(Math.floor(Math.random() * 4));
-      ctx.players.forEach((p) => { prog[p.id] = 0; });
-      phase = 'intro'; lit = -1; until = Date.now() + 1500; dur = 1500;
-      ctx.push();
-      T.after(1500, show);
-    }
-    function show() {
-      const step = Math.max(300, 560 - round * 22);
-      const gap = Math.max(140, 260 - round * 8);
-      const total = seq.length * (step + gap) + 400;
-      phase = 'show'; lit = -1; until = Date.now() + total; dur = total;
-      ctx.push();
-      seq.forEach((pad, k) => {
-        T.after(300 + k * (step + gap), () => { lit = pad; ctx.push(); });
-        T.after(300 + k * (step + gap) + step, () => { lit = -1; ctx.push(); });
-      });
-      T.after(total, listen);
-    }
-    function listen() {
-      const ms = 6000 + seq.length * 1300;
-      phase = 'input'; lit = -1; until = Date.now() + ms; dur = ms;
-      ctx.push();
-      inputTimer = T.after(ms, endRound);
-    }
-    function endRound() {
-      if (phase !== 'input') return;
-      T.cancel(inputTimer);
-      for (const p of alive()) {
-        if (prog[p.id] < seq.length) { status[p.id] = 'out'; score[p.id] = round - 1; }
-      }
-      const surv = alive();
-      surv.forEach((p) => { score[p.id] = round; });
-      phase = 'result'; until = Date.now() + 2200; dur = 2200;
-      ctx.push();
-      const over = surv.length === 0 || (!solo && surv.length <= 1) || round >= MAXR;
-      T.after(2200, over ? finish : next);
-    }
-    function finish() {
-      const labels = {};
-      for (const p of ctx.players) {
-        labels[p.id] = `${score[p.id]} ${score[p.id] === 1 ? 'round' : 'rounds'}`;
-      }
-      ctx.finish({ scores: score, labels });
-    }
-    return {
-      start() { next(); },
-      input(pid, m) {
-        if (phase !== 'input' || status[pid] !== 'alive' || prog[pid] >= seq.length) return;
-        const pad = Number(m.pad);
-        if (pad === seq[prog[pid]]) prog[pid]++;
-        else { status[pid] = 'out'; score[pid] = round - 1; }
-        ctx.push();
-        if (alive().every((p) => prog[p.id] >= seq.length)) endRound();
-      },
-      view() {
-        return {
-          game: 'simon', phase, ms: Math.max(0, until - Date.now()), dur, round, len: seq.length, lit,
-          ps: ctx.players.map((p) => ({
-            id: p.id, name: p.name, color: p.color, prog: prog[p.id],
-            status: status[p.id] === 'out' ? 'out' : (phase === 'input' || phase === 'result') && prog[p.id] >= seq.length ? 'done' : 'alive',
-          })),
-        };
-      },
-      stop() { T.cancelAll(); },
-    };
-  },
-};
-
-const GAMES = [tap, reflex, trivia, simon];
+const GAMES = [badminton];
 const byId = Object.fromEntries(GAMES.map((g) => [g.id, g]));
 module.exports = { GAMES, byId };

@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const { h, connect, renderer, numTimer, PADS, shape } = CA;
+  const { h, connect, renderer } = CA;
   const root = document.getElementById('app');
   const qs = new URLSearchParams(location.search);
   let me = null, view = null, joinErr = '', conn;
@@ -49,26 +49,14 @@
   }
 
   // ------------------------------------------------------------ routing
-  const mine = (v) => (v.ps || []).find((p) => p.id === v.you) || {};
-
   function pick(v) {
     if (v.screen === 'join') return { key: 'join', build: buildJoin };
     if (v.screen === 'lobby') return { key: 'lobby', build: lobby };
     if (v.screen === 'results') return { key: 'results', build: results };
-    switch (v.game) {
-      case 'tap':
-        return { key: 'tap:' + v.phase, build: tap, update: v.phase === 'play' ? () => {} : null };
-      case 'reflex':
-        return { key: 'reflex:' + v.phase + ':' + v.round, build: reflex };
-      case 'trivia':
-        return { key: 'trivia:' + v.phase + ':' + v.n + ':' + (v.choice == null ? 'n' : 'y'), build: trivia };
-      case 'simon': {
-        const m = mine(v);
-        return {
-          key: 'simon:' + v.phase + ':' + v.round + ':' + m.status, build: simon,
-          update: v.phase === 'input' && m.status === 'alive' ? updSimon : null,
-        };
-      }
+    if (v.game === 'badminton') {
+      return v.phase === 'over'
+        ? { key: 'bd:over', build: matchOver }
+        : { key: 'bd:play', build: badminton, update: updBd };
     }
     return null;
   }
@@ -88,24 +76,21 @@
 
   // ------------------------------------------------------------ join
   function buildJoin(v) {
-    return h('form', {
-      class: 'joinform',
-      onsubmit: (e) => { e.preventDefault(); doJoin(); },
-    },
-    h('div', { class: 'logo sm' }, h('span', { class: 'l1' }, 'COUCH'), h('span', { class: 'l2' }, 'ARCADE')),
-    h('label', null, 'Room code',
-      h('input', {
-        class: 'codeinput', value: codeVal, maxlength: 4, autocapitalize: 'characters', autocomplete: 'off',
-        spellcheck: 'false', placeholder: 'ABCD',
-        oninput: (e) => { codeVal = e.target.value.toUpperCase().replace(/[^A-Z]/g, ''); e.target.value = codeVal; },
-      })),
-    h('label', null, 'Your name',
-      h('input', {
-        value: nameVal, maxlength: 12, autocomplete: 'off', placeholder: 'e.g. Sam',
-        oninput: (e) => { nameVal = e.target.value; },
-      })),
-    v.err ? h('p', { class: 'err' }, v.err) : null,
-    h('button', { class: 'cta', type: 'submit' }, 'Join'));
+    return h('form', { class: 'joinform', onsubmit: (e) => { e.preventDefault(); doJoin(); } },
+      h('div', { class: 'logo sm' }, h('span', { class: 'l1' }, 'BADMINTON'), h('span', { class: 'l2' }, 'NIGHT')),
+      h('label', null, 'Room code',
+        h('input', {
+          class: 'codeinput', value: codeVal, maxlength: 4, autocapitalize: 'characters', autocomplete: 'off',
+          spellcheck: 'false', placeholder: 'ABCD',
+          oninput: (e) => { codeVal = e.target.value.toUpperCase().replace(/[^A-Z]/g, ''); e.target.value = codeVal; },
+        })),
+      h('label', null, 'Your name',
+        h('input', {
+          value: nameVal, maxlength: 12, autocomplete: 'off', placeholder: 'e.g. Sam',
+          oninput: (e) => { nameVal = e.target.value; },
+        })),
+      v.err ? h('p', { class: 'err' }, v.err) : null,
+      h('button', { class: 'cta', type: 'submit' }, 'Join'));
   }
 
   // ------------------------------------------------------------ lobby
@@ -115,115 +100,75 @@
     let body;
     if (v.vip) {
       body = [
-        h('h2', null, 'You pick the game'),
-        sub('Or use the keyboard on the big screen.'),
-        h('div', { class: 'gbtns' }, v.games.map((g, i) =>
-          h('button', {
-            class: 'gbtn', style: { '--a': PADS[i].c },
-            onclick: () => conn.send({ t: 'start', game: g.id }),
-          }, h('b', null, g.name), h('small', null, g.tag)))),
+        h('h2', null, "You're in"),
+        sub('Start the match when everyone has joined.'),
+        h('button', { class: 'cta big', onclick: () => conn.send({ t: 'start', game: v.games[0].id }) }, 'Start match'),
         others,
       ];
     } else {
-      body = [h('h2', null, "You're in!"), sub('Waiting for the next game to start...'), others];
+      body = [h('h2', null, "You're in!"), sub('Waiting for the match to start...'), others];
     }
     return frame(v, body);
   }
 
-  // ------------------------------------------------------------ Tap Frenzy
-  function tap(v) {
-    if (v.phase === 'countdown') {
-      return frame(v, [kicker('Tap Frenzy'), h('div', { class: 'bignum' }, numTimer(v)), sub('Get ready...')]);
-    }
-    if (v.phase === 'done') {
-      return frame(v, [huge('Time!'), sub((mine(v).taps || 0) + ' taps')]);
-    }
-    let n = 0;
-    const count = h('div', { class: 'tapcount' }, '0');
-    const btn = h('div', {
-      class: 'tapbtn',
-      onpointerdown: (e) => {
-        e.preventDefault();
-        n++; count.textContent = n;
-        btn.classList.remove('pulse'); void btn.offsetWidth; btn.classList.add('pulse');
-        conn.send({ t: 'in' });
-        buzz(8);
-      },
-    }, count, h('div', { class: 'taplabel' }, 'TAP!'));
-    return frame(v, [h('div', { class: 'ptimer' }, numTimer(v)), btn], 'tapframe');
+  // ------------------------------------------------------------ Badminton
+  function paintBd(v, score, status) {
+    if (!score || !status) return;
+    score.textContent = v.score[0] + '  :  ' + v.score[1];
+    const side = v.team === 0 ? 'LEFT' : 'RIGHT';
+    let s;
+    if (v.phase === 'intro') s = 'Match starting. You play on the ' + side;
+    else if (v.phase === 'serve') s = v.serving === v.team ? 'Your serve! Get under the shuttle' : 'Their serve. Get ready';
+    else if (v.phase === 'point') s = v.banner;
+    else s = 'You are on the ' + side;
+    status.textContent = s;
+  }
+  function updBd(v, wrap) {
+    paintBd(v, wrap.querySelector('.bdscore'), wrap.querySelector('.bdstatus'));
   }
 
-  // ------------------------------------------------------------ Quick Draw
-  function reflex(v) {
-    const press = () => { conn.send({ t: 'in' }); buzz(15); };
-    const locked = v.locked.includes(v.you);
-    if (v.phase === 'intro') return frame(v, [kicker('Round ' + v.round + '/' + v.rounds), huge('Ready?')]);
-    if (v.phase === 'result') {
-      const w = v.winner;
-      const text = !w ? 'No winner' : w.id === v.you ? 'You won!' : (v.ps.find((p) => p.id === w.id) || {}).name + ' wins';
-      return frame(v, [huge(text), w ? sub(w.ms + ' ms') : null]);
-    }
-    let cls, label;
-    if (locked) { cls = 'locked'; label = 'Too early!'; }
-    else if (v.phase === 'wait') { cls = 'wait'; label = 'WAIT...'; }
-    else { cls = 'go'; label = 'TAP!'; }
-    return frame(v, h('button', { class: 'reflexbtn ' + cls, onpointerdown: press }, label), 'bigbody');
-  }
+  function badminton(v) {
+    const score = h('div', { class: 'bdscore' });
+    const status = h('div', { class: 'bdstatus' });
+    paintBd(v, score, status);
 
-  // ------------------------------------------------------------ Trivia
-  function trivia(v) {
-    if (v.phase === 'intro') return frame(v, [kicker('Trivia Blitz'), huge('Ready?'), sub('Answer fast for bonus points')]);
-    const ans = v.choice;
-    if (v.phase === 'question') {
-      if (ans != null) {
-        return frame(v, [h('div', { class: 'lockedin', style: { '--c': PADS[ans].c } }, shape(ans)), huge('Locked in'), sub('Waiting for the others...')]);
-      }
-      return frame(v, [
-        h('div', { class: 'qmini' }, v.q),
-        h('div', { class: 'abtns' }, v.opts.map((t, i) =>
-          h('button', {
-            class: 'abtn', style: { '--c': PADS[i].c },
-            onpointerdown: (e) => { e.preventDefault(); conn.send({ t: 'in', choice: i }); buzz(12); },
-          }, shape(i), h('span', null, t)))),
-      ], 'triv');
-    }
-    const ok = ans === v.correct;
-    const gain = v.gained[v.you] || 0;
+    // slide pad: your finger position maps to your position on your half of the court
+    const thumb = h('i', { class: 'thumb' });
+    let lastSend = 0, f = 0.5;
+    const send = (force) => {
+      const n = performance.now();
+      if (force || n - lastSend > 35) { lastSend = n; conn.send({ t: 'in', k: 'pos', f: Math.round(f * 1000) / 1000 }); }
+    };
+    const set = (e) => {
+      const r = pad.getBoundingClientRect();
+      f = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+      thumb.style.left = f * 100 + '%';
+      send(false);
+    };
+    const pad = h('div', {
+      class: 'movepad',
+      onpointerdown: (e) => { e.preventDefault(); pad.setPointerCapture(e.pointerId); pad.classList.add('on'); set(e); },
+      onpointermove: (e) => { if (pad.classList.contains('on')) set(e); },
+      onpointerup: () => { pad.classList.remove('on'); send(true); },
+      onpointercancel: () => { pad.classList.remove('on'); send(true); },
+    }, h('span', { class: 'padlabel' }, 'Slide to move'), thumb);
+
+    const shot = (s, label, hint, col) => h('button', {
+      class: 'shotbtn', style: { '--c': col },
+      onpointerdown: (e) => { e.preventDefault(); conn.send({ t: 'in', k: 'shot', s }); buzz(14); },
+    }, h('b', null, label), h('small', null, hint));
+
     return frame(v, [
-      h('div', { class: 'verdict ' + (ok ? 'ok' : 'no') }, ans == null ? 'Too slow' : ok ? 'Correct!' : 'Nope'),
-      h('div', { class: 'huge' }, ok ? '+' + gain : '+0'),
-      sub('Answer: ' + v.opts[v.correct]),
-    ]);
+      score, status, pad,
+      h('div', { class: 'shots' },
+        shot('lob', 'Lob', 'high and deep', '#4cc9f0'),
+        shot('drop', 'Drop', 'soft by the net', '#b8f35a'),
+        shot('smash', 'Smash', 'fast and hard', '#ff5d73')),
+    ], 'bdframe');
   }
 
-  // ------------------------------------------------------------ Memory Pads
-  function simon(v) {
-    const m = mine(v);
-    if (m.status === 'out') {
-      return frame(v, [huge('Out!'), sub('Watch the rest on the big screen')]);
-    }
-    if (v.phase === 'intro') return frame(v, [kicker('Memory Pads'), huge('Round ' + v.round)]);
-    if (v.phase === 'show') return frame(v, [huge('Watch'), sub('Remember the order on the big screen')], 'watch');
-    if (v.phase === 'result') return frame(v, [huge('Nice!'), sub('Round complete')]);
-    if (m.status === 'done') return frame(v, [huge('Done!'), sub('Waiting for the others...')]);
-    const dots = h('div', { class: 'dots' }, Array.from({ length: v.len }, (_, i) =>
-      h('i', { class: i < (m.prog || 0) ? 'on' : '' })));
-    const pads = h('div', { class: 'padgrid' }, PADS.map((p, i) =>
-      h('button', {
-        class: 'pbtn', style: { '--c': p.c },
-        onpointerdown: (e) => {
-          e.preventDefault();
-          e.currentTarget.classList.add('hit');
-          setTimeout(() => e.target.classList && e.target.classList.remove('hit'), 120);
-          conn.send({ t: 'in', pad: i });
-          buzz(10);
-        },
-      }, shape(i))));
-    return frame(v, [h('div', { class: 'ptimer' }, numTimer(v)), dots, pads], 'bigbody');
-  }
-  function updSimon(v, wrap) {
-    const m = mine(v);
-    wrap.querySelectorAll('.dots i').forEach((el, i) => el.classList.toggle('on', i < (m.prog || 0)));
+  function matchOver(v) {
+    return frame(v, [kicker('Match over'), huge(v.banner), sub(v.score[0] + ' : ' + v.score[1])]);
   }
 
   // ------------------------------------------------------------ Results

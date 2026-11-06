@@ -217,3 +217,41 @@ html.phone .kicker { font-size: .85rem; }
 @media (prefers-reduced-motion: reduce) {
   .bg i, .logo, .bignum, .huge.go, .watch .huge { animation: none; }
 }
+
+/* ---------- badminton ---------- */
+.bdstage { padding: 0; }
+.bdwrap { position: relative; flex: 1; min-height: 0; }
+.bdcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.bdhud { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: center; align-items: center; gap: 2.4rem; z-index: 2; pointer-events: none; }
+.bdteam { display: flex; align-items: center; gap: 1.1rem; padding: .5rem 1.4rem; border-radius: 99px; background: rgba(255,255,255,.06); border: 1px solid var(--line); backdrop-filter: blur(8px); min-width: 15rem; justify-content: space-between; font-weight: 800; }
+.bdteam.t0 { border-color: rgba(255,93,115,.5); }
+.bdteam.t1 { border-color: rgba(76,201,240,.5); }
+.bdteam.srv { box-shadow: 0 0 0 .2rem rgba(255,255,255,.55), 0 0 2rem rgba(255,255,255,.25); }
+.bdteam .tn { font-size: 1.3rem; }
+.bdteam .ts { font-size: 3.4rem; line-height: 1; font-variant-numeric: tabular-nums; }
+.bdmid { color: var(--mute); font-weight: 800; letter-spacing: .16em; text-transform: uppercase; font-size: .9rem; }
+.bdover { position: absolute; left: 0; right: 0; top: 24%; z-index: 2; text-align: center; pointer-events: none; display: flex; flex-direction: column; align-items: center; gap: .4rem; }
+.bdover .huge.win { color: var(--lime); text-shadow: 0 0 3rem rgba(184,243,90,.5); }
+.startcard { display: flex; align-items: center; gap: 1.4rem; text-align: left; cursor: pointer; padding: 1.5rem 1.8rem; border-radius: 1.5rem; border: 1px solid rgba(184,243,90,.5); background: linear-gradient(160deg, rgba(184,243,90,.22), rgba(255,255,255,.04)); transition: transform .18s var(--ease), border-color .2s; }
+.startcard:hover:not(:disabled) { transform: scale(1.015); border-color: var(--lime); }
+.startcard:disabled { opacity: .4; cursor: not-allowed; }
+.startcard h3 { font-size: 2rem; }
+.startcard p { color: var(--mute); font-size: 1.1rem; margin-top: .2rem; }
+.startcard .gicon { color: var(--lime); flex: none; width: 4rem; height: 4rem; }
+.startcard kbd { margin-left: auto; font-size: 1rem; }
+.cta.big { padding: 1.1rem 2.4rem; font-size: 1.3rem; }
+
+.pmain:has(.movepad) { align-items: stretch; gap: .8rem; }
+.bdscore { font-size: 2.6rem; font-weight: 900; font-variant-numeric: tabular-nums; white-space: pre; }
+.bdstatus { color: var(--mute); font-weight: 700; min-height: 1.3em; }
+.movepad { flex: 1; position: relative; border-radius: 1.6rem; touch-action: none; border: 1px dashed color-mix(in srgb, var(--me) 60%, transparent); background: linear-gradient(180deg, color-mix(in srgb, var(--me) 16%, transparent), rgba(255,255,255,.03)); display: grid; place-items: center; }
+.movepad.on { background: linear-gradient(180deg, color-mix(in srgb, var(--me) 30%, transparent), rgba(255,255,255,.05)); }
+.padlabel { color: var(--mute); font-weight: 800; letter-spacing: .12em; text-transform: uppercase; font-size: .85rem; pointer-events: none; }
+.thumb { position: absolute; left: 50%; top: 50%; width: 4.2rem; height: 4.2rem; margin: -2.1rem 0 0 -2.1rem; border-radius: 50%; background: var(--me); box-shadow: 0 0 2.4rem color-mix(in srgb, var(--me) 70%, transparent); pointer-events: none; opacity: 0; transition: opacity .15s; }
+.movepad.on .thumb { opacity: 1; }
+.shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
+.shotbtn { border: 2px solid color-mix(in srgb, var(--c) 65%, transparent); border-radius: 1.2rem; background: color-mix(in srgb, var(--c) 20%, #0e1124); padding: 1.3rem .3rem; display: flex; flex-direction: column; gap: .2rem; align-items: center; touch-action: manipulation; }
+.shotbtn b { font-size: 1.25rem; }
+.shotbtn small { color: var(--mute); font-size: .72rem; }
+.shotbtn:active { background: var(--c); color: #0b0d17; transform: scale(.97); }
+.shotbtn:active small { color: #0b0d17; }
