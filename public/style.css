@@ -192,3 +192,46 @@ html.phone .bignum { font-size: 6rem; }
 @media (prefers-reduced-motion: reduce) {
   .bg::before, .bg::after, .logo, .bignum, .huge.win { animation: none; }
 }
+
+/* ---------- lobby game cards ---------- */
+.cards { display: flex; flex-direction: column; gap: 1.1rem; }
+.startcard.sel:not(:disabled) { outline: 4px solid var(--yellow); outline-offset: 4px; }
+.cards .startcard:nth-child(2) { background: var(--sky); }
+.cards .startcard:nth-child(2):hover:not(:disabled) { background: var(--cyan); }
+.cards .startcard:disabled { background: var(--dim); }
+.startcard p { font-size: 1.25rem; }
+
+/* ---------- racing HUD (monitor) ---------- */
+.rclist { position: absolute; top: 1.2rem; left: 1.2rem; display: flex; flex-direction: column; gap: .5rem; z-index: 2; pointer-events: none; }
+.rcrow { display: grid; grid-template-columns: 1.4rem 1rem 8.5rem auto; gap: .7rem; align-items: center; padding: .55rem .9rem; background: rgba(26,28,44,.9); box-shadow: var(--notch), inset 5px 0 0 0 var(--c); }
+.rcrow b { font-family: var(--head); font-size: .8rem; color: var(--yellow); font-weight: 400; }
+.rcrow i { width: 1rem; height: 1rem; background: var(--c); box-shadow: 0 0 0 3px var(--edge); }
+.rcrow span { font-family: var(--head); font-size: .6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rcrow em { font-style: normal; color: var(--mute); font-size: 1.1rem; text-align: right; min-width: 4.4rem; }
+.rclap { position: absolute; top: 1.2rem; left: 50%; transform: translateX(-50%); z-index: 2; font-family: var(--head); font-size: .95rem; background: rgba(26,28,44,.9); padding: .8rem 1.3rem; box-shadow: var(--notch); white-space: pre; color: var(--yellow); pointer-events: none; }
+.rcmap { position: absolute; top: 1.2rem; right: 1.2rem; width: 240px; height: 190px; z-index: 2; box-shadow: var(--notch); pointer-events: none; image-rendering: pixelated; }
+
+/* ---------- racing controls (phone) ---------- */
+.rcframe .pmain { align-items: stretch; justify-content: flex-start; gap: .7rem; }
+.rctop { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.rcpos { font-family: var(--head); font-size: 1.9rem; color: var(--yellow); text-shadow: 3px 3px 0 var(--red); }
+.rclapt { font-family: var(--head); font-size: .75rem; color: var(--cyan); }
+.rcspeed, .rcboost { position: relative; height: 1.1rem; background: var(--panel); box-shadow: var(--notch); }
+.rcspeed i, .rcboost i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--lime); }
+.rcspeed i.boosting { background: var(--coral); }
+.rcspeed i.off { background: var(--coral); }
+.rcboost i { background: var(--coral); }
+.rcspeed small, .rcboost small { position: absolute; left: .5rem; top: 50%; transform: translateY(-50%); font-family: var(--head); font-size: .45rem; color: var(--ink); mix-blend-mode: difference; }
+.steerarea { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.wheel { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .8rem; background: var(--panel); box-shadow: var(--notch), inset 0 -8px 0 0 var(--me, var(--sky)); min-height: 0; }
+.wheelwrap { width: min(62vw, 36vh); aspect-ratio: 1; will-change: transform; }
+.wheelwrap svg { width: 100%; height: 100%; display: block; }
+.wheelhint { font-family: var(--head); font-size: .5rem; color: var(--mute); }
+.steerbtns { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+.steerbtn { border: 0; background: var(--panel2); color: var(--ink); font-family: var(--head); font-size: 1rem; box-shadow: var(--notch), var(--bevel); touch-action: none; user-select: none; -webkit-user-select: none; }
+.steerbtn.on { background: var(--sky); color: var(--edge); }
+.pedals { display: grid; grid-template-columns: 1fr 1.5fr; gap: .8rem; }
+.pedal { border: 0; padding: 1.5rem 0; font-family: var(--head); font-size: .85rem; color: var(--edge); box-shadow: var(--notch), var(--bevel); touch-action: none; user-select: none; -webkit-user-select: none; }
+.pedal.brake { background: var(--red); color: var(--ink); }
+.pedal.boost { background: var(--coral); }
+.pedal.on { filter: brightness(1.3); transform: translateY(4px); }

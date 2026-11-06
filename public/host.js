@@ -4,9 +4,10 @@
   const root = document.getElementById('app');
   const watching = location.pathname === '/watch';
   const watchCode = (new URLSearchParams(location.search).get('room') || '').toUpperCase();
-  let room = null, view = null, prev = null, conn;
+  let room = null, view = null, prev = null, conn, sel = 0;
 
   const ICON = {
+    racing: '<svg viewBox="0 0 64 64" fill="currentColor"><rect x="6" y="26" width="52" height="16"/><rect x="16" y="16" width="30" height="12"/><rect x="10" y="40" width="12" height="12" fill="#1a1c2c"/><rect x="42" y="40" width="12" height="12" fill="#1a1c2c"/><rect x="20" y="19" width="10" height="7" fill="#73eff7"/><rect x="34" y="19" width="9" height="7" fill="#73eff7"/></svg>',
     badminton: '<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><ellipse cx="22" cy="22" rx="12" ry="16" transform="rotate(45 22 22)"/><path d="M31 31 54 54"/><circle cx="52" cy="12" r="4.500" fill="currentColor" stroke="none"/></svg>',
   };
 
@@ -39,6 +40,21 @@
     if (b.screen === 'results' && (!a || a.screen !== 'results')) snd.win();
     if (b.screen !== 'game') return;
     const same = a && a.screen === 'game';
+    if (b.game === 'racing') {
+      if (b.phase === 'count') {
+        const n = Math.ceil(b.ms / 1000), pn = same && a.phase === 'count' ? Math.ceil(a.ms / 1000) : 0;
+        if (n !== pn && n > 0) snd.beep(520);
+      }
+      if (b.phase === 'race' && (!same || a.phase !== 'race')) snd.go();
+      if (b.ev && (!same || !a.ev || a.ev.n !== b.ev.n)) {
+        const k = b.ev.k;
+        if (k === 'lap') snd.ok();
+        else if (k === 'finish') snd.win();
+        else if (k === 'wall') snd.bad();
+        else if (k === 'bump') snd.beep(180);
+      }
+      return;
+    }
     if (b.phase === 'serve' && (!same || a.phase !== 'serve')) snd.go();
     if (b.ev && (!same || !a.ev || a.ev.n !== b.ev.n)) {
       const k = b.ev.k;
@@ -59,9 +75,16 @@
       toast(snd.toggleMute() ? 'Sound off' : 'Sound on');
     } else if (!view || watching) {
       return;
-    } else if (view.screen === 'lobby' && (e.key === 'Enter' || e.key === ' ' || e.key === '1')) {
+    } else if (view.screen === 'lobby' && /^[1-9]$/.test(e.key) && view.games[Number(e.key) - 1]) {
       e.preventDefault();
-      conn.send({ t: 'start', game: view.games[0].id });
+      conn.send({ t: 'start', game: view.games[Number(e.key) - 1].id });
+    } else if (view.screen === 'lobby' && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      conn.send({ t: 'start', game: view.games[sel].id });
+    } else if (view.screen === 'lobby' && /^Arrow/.test(e.key)) {
+      e.preventDefault();
+      sel = (sel + (e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? view.games.length - 1 : 1)) % view.games.length;
+      document.querySelectorAll('.startcard').forEach((el, i) => el.classList.toggle('sel', i === sel));
     } else if (view.screen === 'results' && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       conn.send({ t: 'lobby' });
@@ -82,6 +105,7 @@
     if (v.screen === 'lobby') return { key: 'lobby:' + (room ? room.code : ''), build: buildLobby };
     if (v.screen === 'results') return { key: 'results', build: buildResults };
     if (v.game === 'badminton') return { key: 'bd', build: buildBadminton, update: updateBadminton };
+    if (v.game === 'racing') return { key: 'race', build: buildRace, update: updateRace };
     return null;
   }
 
@@ -93,8 +117,8 @@
     const live = connected.length;
     const short = room ? new URL(room.url).host + '/play' : '';
     const left = h('section', { class: 'join' },
-      h('div', { class: 'logo', 'aria-label': 'Badminton' },
-        h('span', { class: 'l1' }, 'BADMINTON'), h('span', { class: 'l2' }, 'NIGHT')),
+      h('div', { class: 'logo', 'aria-label': 'WI Games Arcade' },
+        h('span', { class: 'l1' }, 'WI GAMES'), h('span', { class: 'l2' }, 'ARCADE')),
       room && room.qr ? h('div', { class: 'qrcard' }, h('div', { class: 'qr', html: room.qr })) : h('div', { class: 'qrcard skeleton' }),
       h('p', { class: 'steps' }, 'Scan with your phone camera'),
       room ? h('div', { class: 'code' }, room.code.split('').map((c) => h('b', null, c))) : null,
@@ -106,31 +130,145 @@
       if (!p) {
         return h('div', { class: 'slot empty' }, h('div', { class: 'avatar' }, '+'), h('div', { class: 'sname' }, 'Waiting...'));
       }
-      const idx = connected.findIndex((x) => x.id === p.id);
-      const side = idx < 0 ? 'offline' : idx % 2 === 0 ? 'Left team' : 'Right team';
+      const side = p.connected ? 'Player ' + (i + 1) : 'offline';
       return h('div', { class: 'slot' + (p.connected ? '' : ' off'), style: { '--c': p.color } },
         h('div', { class: 'avatar' }, initial(p)),
         h('div', { class: 'sname' }, p.name),
         h('div', { class: 'spts' }, side + ' · ' + p.points + ' pts'));
     });
 
-    const g = v.games[0];
-    const start = h('button', {
-      class: 'startcard', disabled: live < 1,
+    const cards = v.games.map((g, i) => h('button', {
+      class: 'startcard' + (i === sel ? ' sel' : ''), disabled: live < 1,
       onclick: () => conn.send({ t: 'start', game: g.id }),
     },
-    h('div', { class: 'gicon', html: ICON.badminton }),
-    h('div', null,
-      h('h3', null, live < 1 ? 'Waiting for players' : 'Start match'),
-      h('p', null, live === 1 ? 'One player: you play the CPU' : live >= 2 ? 'First to ' + 11 + ', win by 2' : g.tag)),
-    h('kbd', null, 'Enter'));
+    h('div', { class: 'gicon', html: ICON[g.id] || '' }),
+    h('div', null, h('h3', null, g.name), h('p', null, live < 1 ? 'Waiting for players' : g.tag)),
+    h('kbd', null, String(i + 1))));
 
     const right = h('section', { class: 'lobbyr' },
       h('div', { class: 'slots' }, slots),
-      start,
-      h('p', { class: 'hint' }, 'Phones 1 and 3 play on the left, phones 2 and 4 on the right. Slide your thumb to move, then swing your phone (down = smash, up = lob, flick = drop) or tap the buttons when the shuttle is near you.'),
+      h('div', { class: 'cards' }, cards),
+      h('p', { class: 'hint' }, 'Pick a game with the number keys or by tapping it. Badminton: phones 1 and 3 play on the left, 2 and 4 on the right. Racing: hold your phone like a wheel and tilt to steer.'),
       h('p', { class: 'hint' }, h('kbd', null, 'F'), ' fullscreen  ·  ', h('kbd', null, 'M'), ' mute  ·  ', h('kbd', null, 'Esc'), ' back to lobby'));
     return h('div', { class: 'lobby' }, left, right);
+  }
+
+  // ------------------------------------------------------------ Racing
+  const rc = { r3: null, mode: '2d', canvas: null, map: null, list: null, lap: null, over: null, callout: null, v: null, vt: 0, ev: 0, lastT: 0, listSig: '', overSig: '' };
+  const fmtT = (ms) => { const t = ms / 1000, m = Math.floor(t / 60); return m + ':' + (t - m * 60).toFixed(1).padStart(4, '0'); };
+  const ord = (n) => n + (['th', 'st', 'nd', 'rd'][(n % 100 > 10 && n % 100 < 14) ? 0 : n % 10] || 'th');
+
+  function buildRace(v) {
+    if (rc.r3) { rc.r3.dispose(); rc.r3 = null; }
+    rc.canvas = h('canvas', { class: 'bdcanvas' });
+    rc.list = h('div', { class: 'rclist' });
+    rc.lap = h('div', { class: 'rclap' });
+    rc.map = h('canvas', { class: 'rcmap', width: 240, height: 190 });
+    rc.over = h('div', { class: 'bdover' });
+    rc.callout = h('div', { class: 'callout' });
+    rc.listSig = ''; rc.overSig = ''; rc.ev = v.ev ? v.ev.n : 0; rc.lastT = 0; rc.mode = '2d';
+    const wrap = h('div', { class: 'bdwrap' }, rc.canvas, rc.list, rc.lap, rc.map, rc.over, rc.callout);
+    if (window.Race3D && window.Track && webglOk()) {
+      rc.mode = '3d';
+      const cv = rc.canvas;
+      window.Race3D.create(cv).then((r) => {
+        if (rc.canvas === cv) rc.r3 = r; else r.dispose();
+      }).catch((err) => {
+        console.warn('3D track unavailable, using the flat map', err);
+        if (rc.canvas !== cv) return;
+        rc.mode = '2d';
+        rc.canvas = h('canvas', { class: 'bdcanvas' });
+        cv.replaceWith(rc.canvas);
+      });
+    }
+    updateRace(v);
+    requestAnimationFrame(raceLoop);
+    return h('div', { class: 'stage bdstage' }, wrap);
+  }
+
+  function updateRace(v) {
+    rc.v = v; rc.vt = performance.now();
+    const order = v.cars.slice().sort((a, b) => a.place - b.place);
+    if (v.ev && v.ev.n !== rc.ev) {
+      rc.ev = v.ev.n;
+      if (rc.r3) rc.r3.event(v.ev, v);
+      const car = v.cars.find((c) => c.id === v.ev.id);
+      let word = '';
+      if (v.ev.k === 'go') word = 'GO!';
+      else if (v.ev.k === 'finish' && car) word = ord(car.place) + ': ' + car.name;
+      if (word && rc.callout) {
+        rc.callout.textContent = word; rc.callout.className = 'callout ' + (v.ev.k === 'go' ? 'drop' : 'smash');
+        void rc.callout.offsetWidth; rc.callout.classList.add('go');
+      }
+    }
+    const sig = JSON.stringify(order.map((c) => [c.id, c.lap, c.fin, c.ft]));
+    if (sig !== rc.listSig) {
+      rc.listSig = sig;
+      rc.list.replaceChildren(...order.map((c) => h('div', { class: 'rcrow', style: { '--c': c.color } },
+        h('b', null, String(c.place)), h('i', null), h('span', null, c.name + (c.bot ? '' : '')),
+        h('em', null, c.fin ? fmtT(c.ft) : 'LAP ' + c.lap + '/' + v.laps))));
+    }
+    const lead = order[0];
+    rc.lap.textContent = (v.phase === 'race' || v.phase === 'over' ? 'LAP ' + lead.lap + '/' + v.laps + '  ' + fmtT(v.t) : 'LAP 1/' + v.laps);
+    const os = v.phase + (v.phase === 'race' && v.t < 1000 ? ':go' : '') + '|' + v.banner;
+    if (os !== rc.overSig) {
+      rc.overSig = os;
+      if (v.phase === 'intro') rc.over.replaceChildren(h('div', { class: 'kicker' }, 'Race starts soon'), h('div', { class: 'huge sm' }, v.laps + ' LAPS'));
+      else if (v.phase === 'count') rc.over.replaceChildren(h('div', { class: 'kicker' }, 'Get ready'), numTimer(v, 'bignum'));
+      else if (v.phase === 'over') rc.over.replaceChildren(h('div', { class: 'huge sm win' }, v.banner));
+      else rc.over.replaceChildren();
+    }
+  }
+
+  // top-down map: the small minimap, and the fallback view when WebGL is not available
+  function drawMap(g, W, H, v, big) {
+    const T = window.Track;
+    if (!T) return;
+    const minX = -138, maxX = 142, minZ = -96, maxZ = 136;
+    const pad = big ? 40 : 14;
+    const s = Math.min((W - pad * 2) / (maxX - minX), (H - pad * 2) / (maxZ - minZ));
+    const ox = (W - (maxX - minX) * s) / 2, oy = (H - (maxZ - minZ) * s) / 2;
+    const X = (x) => ox + (x - minX) * s, Y = (z) => H - (oy + (z - minZ) * s);
+    g.clearRect(0, 0, W, H);
+    g.fillStyle = big ? '#38b764' : 'rgba(26,28,44,.88)'; g.fillRect(0, 0, W, H);
+    g.lineJoin = 'round'; g.lineCap = 'butt';
+    const path = () => { g.beginPath(); T.P.forEach((p, i) => (i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1])))); g.closePath(); };
+    path(); g.strokeStyle = '#f4f4f4'; g.lineWidth = T.HALF * 2 * s + 4; g.stroke();
+    path(); g.strokeStyle = '#566c86'; g.lineWidth = Math.max(4, T.HALF * 2 * s); g.stroke();
+    g.fillStyle = '#ffcd75'; g.fillRect(X(T.P[0][0]) - 6, Y(T.P[0][1]) - 2, 12, 4);
+    const age = Math.min(0.08, (performance.now() - rc.vt) / 1000);
+    for (const c of v.cars) {
+      const x = X(c.x + Math.sin(c.h) * c.v * age), y = Y(c.z + Math.cos(c.h) * c.v * age), r = big ? 9 : 5;
+      g.fillStyle = '#0d0e1a'; g.fillRect(x - r - 2, y - r - 2, r * 2 + 4, r * 2 + 4);
+      g.fillStyle = c.color; g.fillRect(x - r, y - r, r * 2, r * 2);
+      if (!c.bot) { g.fillStyle = '#fff'; g.fillRect(x - 1, y - 1, 2, 2); }
+      if (big) { g.fillStyle = '#fff'; g.font = '14px "Press Start 2P", monospace'; g.textAlign = 'center'; g.fillText(c.name, x, y - 16); }
+    }
+  }
+
+  function raceLoop(t) {
+    const c = rc.canvas;
+    if (!c || !document.body.contains(c)) {
+      if (rc.r3 && !document.body.contains(rc.canvas)) { rc.r3.dispose(); rc.r3 = null; }
+      return;
+    }
+    requestAnimationFrame(raceLoop);
+    const v = rc.v;
+    if (!v) return;
+    const dt = rc.lastT ? Math.min(0.05, (t - rc.lastT) / 1000) : 0.016;
+    rc.lastT = t;
+    const age = Math.min(0.08, (performance.now() - rc.vt) / 1000);
+    if (rc.mode === '3d') {
+      if (rc.r3) rc.r3.frame(v, dt, age);
+      rc.map.style.display = '';
+    } else {
+      const dpr = window.devicePixelRatio || 1, r = c.getBoundingClientRect();
+      const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+      if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+      drawMap(c.getContext('2d'), W, H, v, true);
+      rc.map.style.display = 'none';
+    }
+    if (rc.mode === '3d') drawMap(rc.map.getContext('2d'), 240, 190, v, false);
   }
 
   // ------------------------------------------------------------ Badminton

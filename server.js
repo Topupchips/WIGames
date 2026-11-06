@@ -167,8 +167,9 @@ function finishGame(room, def, r) {
     const rank = ids.filter((o) => r.scores[o] > r.scores[id]).length;
     const gained = best > 0 ? POINTS[rank] || 0 : 0;
     if (p) p.points += gained;
+    const m = r.meta && r.meta[id];
     return {
-      id, name: p ? p.name : '?', color: p ? p.color : '#888',
+      id, name: p ? p.name : m ? m.name : '?', color: p ? p.color : m ? m.color : '#888',
       label: (r.labels && r.labels[id]) || String(r.scores[id]),
       rank, gained, total: p ? p.points : 0,
     };
@@ -274,7 +275,7 @@ async function main() {
   if (USE_HTTPS) {
     // Self-signed certificate so phones get a secure context (needed for motion sensors).
     const selfsigned = require('selfsigned');
-    const pems = await selfsigned.generate([{ name: 'commonName', value: 'badminton.local' }], {
+    const pems = await selfsigned.generate([{ name: 'commonName', value: 'wigames.local' }], {
       days: 365,
       extensions: [{ name: 'subjectAltName', altNames: [
         { type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }, { type: 7, ip: lanIP() },
@@ -323,7 +324,7 @@ async function main() {
   }, 25000).unref();
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log('\n  Badminton Night is running\n');
+    console.log('\n  WI Games Arcade is running\n');
     const proto = USE_HTTPS ? 'https' : 'http';
     console.log(`  Open on your monitor:  ${proto}://localhost:${PORT}`);
     console.log(`  Phones join via QR (same Wi-Fi), or visit ${proto}://${lanIP()}:${PORT}/play\n`);

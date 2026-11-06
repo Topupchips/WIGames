@@ -58,6 +58,11 @@
         ? { key: 'bd:over', build: matchOver }
         : { key: 'bd:play', build: badminton, update: updBd };
     }
+    if (v.game === 'racing') {
+      return v.phase === 'over'
+        ? { key: 'rc:over', build: raceOver }
+        : { key: 'rc:play', build: racing, update: updRc };
+    }
     return null;
   }
 
@@ -77,7 +82,7 @@
   // ------------------------------------------------------------ join
   function buildJoin(v) {
     return h('form', { class: 'joinform', onsubmit: (e) => { e.preventDefault(); doJoin(); } },
-      h('div', { class: 'logo sm' }, h('span', { class: 'l1' }, 'BADMINTON'), h('span', { class: 'l2' }, 'NIGHT')),
+      h('div', { class: 'logo sm' }, h('span', { class: 'l1' }, 'WI GAMES'), h('span', { class: 'l2' }, 'ARCADE')),
       h('label', null, 'Room code',
         h('input', {
           class: 'codeinput', value: codeVal, maxlength: 4, autocapitalize: 'characters', autocomplete: 'off',
@@ -101,12 +106,12 @@
     if (v.vip) {
       body = [
         h('h2', null, "You're in"),
-        sub('Start the match when everyone has joined.'),
-        h('button', { class: 'cta big', onclick: () => conn.send({ t: 'start', game: v.games[0].id }) }, 'Start match'),
+        sub('Pick a game when everyone has joined.'),
+        ...v.games.map((g) => h('button', { class: 'cta big', onclick: () => conn.send({ t: 'start', game: g.id }) }, g.name)),
         others,
       ];
     } else {
-      body = [h('h2', null, "You're in!"), sub('Waiting for the match to start...'), others];
+      body = [h('h2', null, "You're in!"), sub('Waiting for the game to start...'), others];
     }
     return frame(v, body);
   }
@@ -140,6 +145,10 @@
 
   function onMotion(e) {
     const acc = e.acceleration, ag = e.accelerationIncludingGravity, rr = e.rotationRate;
+    if (wheel.tilt) { // racing: the phone is a steering wheel
+      if (ag && ag.x != null) { motion.got = true; onWheel(ag); }
+      return;
+    }
     if (ag && ag.x != null) {
       if (!motion.g) motion.g = [ag.x, ag.y, ag.z];
       else if (!motion.tracking) {
@@ -326,8 +335,140 @@
     return frame(v, [kicker('Match over'), huge(v.banner), sub(v.score[0] + ' : ' + v.score[1])]);
   }
 
-  // ------------------------------------------------------------ Results
   const ord = (n) => n + (['th', 'st', 'nd', 'rd'][(n % 100 > 10 && n % 100 < 14) ? 0 : n % 10] || 'th');
+
+  // ------------------------------------------------------------ Racing (tilt like a steering wheel)
+  // Rotation of the phone around the axis through its screen is read from the direction of gravity
+  // in the screen plane, relative to how it was held at the start. Clockwise steers right.
+  const WHEEL_RANGE = 38, WHEEL_DEAD = 2.5;
+  const wheel = { tilt: false, steer: 0, target: 0, left: false, right: false, brake: false, boost: false, neutral: null, sx: null, sy: 0, deg: 0, lastSent: 9, sentT: 0 };
+  const clamp1 = (x) => Math.max(-1, Math.min(1, x));
+  function onWheel(ag) {
+    const x = ag.x, y = ag.y;
+    if (Math.hypot(x, y) < 2.5) return; // phone is lying flat: no wheel angle
+    if (wheel.sx === null) { wheel.sx = x; wheel.sy = y; } else { wheel.sx += (x - wheel.sx) * 0.45; wheel.sy += (y - wheel.sy) * 0.45; }
+    const a = Math.atan2(-wheel.sx, wheel.sy);
+    if (wheel.neutral === null) wheel.neutral = a;
+    let d = a - wheel.neutral;
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    wheel.deg = (d * 180) / Math.PI;
+    const m = Math.max(0, Math.abs(wheel.deg) - WHEEL_DEAD) / (WHEEL_RANGE - WHEEL_DEAD);
+    wheel.steer = clamp1(Math.sign(wheel.deg) * m);
+  }
+  function sendRc() {
+    wheel.sentT = performance.now(); wheel.lastSent = wheel.steer;
+    conn.send({ t: 'in', k: 'pedals', v: Math.round(wheel.steer * 100) / 100, brake: wheel.brake, boost: wheel.boost });
+  }
+
+  function paintRc(v, wrap) {
+    const q = (c) => wrap.querySelector(c);
+    const me = v.me;
+    if (!me || !q('.rcpos')) return;
+    q('.rcpos').textContent = ord(me.place);
+    q('.rclapt').textContent = 'LAP ' + me.lap + '/' + v.laps;
+    q('.rcspeed i').style.width = Math.min(100, (me.v / 55) * 100) + '%';
+    q('.rcspeed i').className = me.boosting ? 'boosting' : me.off ? 'off' : '';
+    q('.rcboost i').style.width = Math.round(me.meter * 100) + '%';
+    let st;
+    if (v.phase === 'intro') st = 'Hold your phone like a steering wheel';
+    else if (v.phase === 'count') st = 'Get ready...';
+    else if (me.fin) st = 'You finished! ' + fmtMs(me.finT);
+    else if (me.off) st = 'Off track! Steer back onto the road';
+    else if (v.t < 1200) st = 'GO!';
+    else st = 'Tilt to steer. Hold BOOST on the straights';
+    q('.bdstatus').textContent = st;
+    if (v.phase === 'count' || v.phase === 'intro') { wheel.neutral = null; wheel.sx = null; } // recentre on the grid
+  }
+  const fmtMs = (ms) => { const t = ms / 1000, m = Math.floor(t / 60); return m + ':' + (t - m * 60).toFixed(1).padStart(4, '0'); };
+  function updRc(v, wrap) { paintRc(v, wrap); }
+
+  function racing(v) {
+    const status = h('div', { class: 'bdstatus' });
+    const wheelSvg = h('div', { class: 'wheelwrap', html: '<svg viewBox="0 0 64 64" shape-rendering="crispEdges"><circle cx="32" cy="32" r="25" fill="none" stroke="#f4f4f4" stroke-width="9"/><rect x="29" y="6" width="6" height="9" fill="#ef7d57"/><rect x="8" y="29" width="48" height="6" fill="#94b0c2"/><rect x="29" y="32" width="6" height="26" fill="#94b0c2"/><circle cx="32" cy="32" r="8" fill="#41a6f6"/></svg>' });
+    const wheelEl = h('div', { class: 'wheel' }, wheelSvg, h('small', { class: 'wheelhint' }, 'TILT LIKE A STEERING WHEEL'));
+    const hold = (flag, label, cls) => {
+      const b = h('button', {
+        class: 'pedal ' + cls,
+        onpointerdown: (e) => { e.preventDefault(); b.setPointerCapture(e.pointerId); wheel[flag] = true; b.classList.add('on'); sendRc(); buzz(12); },
+        onpointerup: () => { wheel[flag] = false; b.classList.remove('on'); sendRc(); },
+        onpointercancel: () => { wheel[flag] = false; b.classList.remove('on'); sendRc(); },
+      }, label);
+      return b;
+    };
+    const dirBtn = (side, label) => h('button', {
+      class: 'steerbtn',
+      onpointerdown: function (e) { e.preventDefault(); this.setPointerCapture(e.pointerId); wheel[side] = true; this.classList.add('on'); buzz(8); },
+      onpointerup: function () { wheel[side] = false; this.classList.remove('on'); },
+      onpointercancel: function () { wheel[side] = false; this.classList.remove('on'); },
+    }, label);
+    const steerPad = h('div', { class: 'steerbtns' }, dirBtn('left', '< LEFT'), dirBtn('right', 'RIGHT >'));
+    const area = h('div', { class: 'steerarea' });
+    const modeBtn = h('button', { class: 'modebtn' });
+    const calBtn = h('button', { class: 'modebtn' }, 'RECENTER');
+    const modes = h('div', { class: 'modes' });
+    const note = h('p', { class: 'motionnote' });
+    const paint = () => {
+      area.replaceChildren(wheel.tilt ? wheelEl : steerPad);
+      modeBtn.textContent = wheel.tilt ? 'USE BUTTONS' : 'TILT TO STEER';
+      modes.replaceChildren(modeBtn, ...(wheel.tilt ? [calBtn] : []));
+    };
+    modeBtn.addEventListener('click', async () => {
+      if (wheel.tilt) { wheel.tilt = false; wheel.steer = 0; note.textContent = ''; paint(); return; }
+      if (!window.isSecureContext) {
+        note.textContent = 'Phone sensors need a secure (https) link. Run npm run start:https, or see the README.';
+        return;
+      }
+      note.textContent = 'Checking motion sensor...';
+      wheel.tilt = true; wheel.neutral = null; wheel.sx = null;
+      const r = await enableMotion();
+      motion.on = false; // racing does its own sensor handling
+      if (r === 'ok') { note.textContent = ''; paint(); }
+      else {
+        wheel.tilt = false;
+        note.textContent = r === 'denied' ? 'Motion permission was denied. Allow it in the browser settings and try again.'
+          : 'No motion data received. Use the buttons, or try another browser.';
+        paint();
+      }
+    });
+    calBtn.addEventListener('click', () => { wheel.neutral = null; wheel.sx = null; buzz(15); });
+
+    const pos = h('div', { class: 'rcpos' }), lapT = h('div', { class: 'rclapt' });
+    const speed = h('div', { class: 'rcspeed' }, h('i'), h('small', null, 'SPEED'));
+    const boost = h('div', { class: 'rcboost' }, h('i'), h('small', null, 'BOOST'));
+    const pedals = h('div', { class: 'pedals' }, hold('brake', 'BRAKE', 'brake'), hold('boost', 'BOOST', 'boost'));
+    const body = [h('div', { class: 'rctop' }, pos, lapT), speed, boost, status, area, pedals, modes, note];
+    const out = frame(v, body, 'rcframe');
+    paint(); paintRc(v, out);
+
+    // drive loop: eases the touch steering and streams inputs while this screen is shown
+    let last = performance.now(), mounted = false;
+    function loop(t) {
+      if (!document.body.contains(out)) {
+        if (!mounted) return requestAnimationFrame(loop); // not attached yet
+        wheel.brake = wheel.boost = wheel.left = wheel.right = false; wheel.steer = 0; return;
+      }
+      mounted = true;
+      requestAnimationFrame(loop);
+      const dt = Math.min(0.05, (t - last) / 1000); last = t;
+      if (!wheel.tilt) {
+        const target = (wheel.right ? 1 : 0) - (wheel.left ? 1 : 0);
+        wheel.steer += Math.max(-8 * dt, Math.min(8 * dt, target - wheel.steer));
+        wheel.deg = wheel.steer * WHEEL_RANGE;
+      }
+      wheelSvg.style.transform = 'rotate(' + wheel.deg.toFixed(1) + 'deg)';
+      if (Math.abs(wheel.steer - wheel.lastSent) > 0.015 || performance.now() - wheel.sentT > 160) sendRc();
+    }
+    requestAnimationFrame(loop);
+    return out;
+  }
+
+  function raceOver(v) {
+    const me = v.me;
+    return frame(v, [kicker('Race over'), huge(me ? ord(me.place) : ''), sub(me && me.fin ? 'Finished in ' + fmtMs(me.finT) : 'Did not finish')]);
+  }
+
+  // ------------------------------------------------------------ Results
   function results(v) {
     const r = v.rows.find((x) => x.id === v.you);
     return frame(v, [
