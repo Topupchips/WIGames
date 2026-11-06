@@ -127,6 +127,50 @@
     paintBd(v, wrap.querySelector('.bdscore'), wrap.querySelector('.bdstatus'));
   }
 
+
+  // ------------------------------------------------------------ Motion (swing the phone)
+  // Peak acceleration (m/s^2) decides the shot: soft flick = drop, medium = lob, hard = smash.
+  const SWING_MIN = 13, LOB_AT = 22, SMASH_AT = 36;
+  const motion = { on: false, listening: false, got: false, ui: null, cool: 0, tracking: false, t0: 0, peak: 0 };
+
+  function onMotion(e) {
+    const a = e.acceleration, g = e.accelerationIncludingGravity;
+    let m;
+    if (a && a.x != null) m = Math.hypot(a.x, a.y, a.z);
+    else if (g && g.x != null) m = Math.abs(Math.hypot(g.x, g.y, g.z) - 9.81);
+    else return;
+    motion.got = true;
+    if (!motion.on) return;
+    const now = performance.now();
+    if (now < motion.cool) return;
+    if (!motion.tracking) {
+      if (m > SWING_MIN) { motion.tracking = true; motion.t0 = now; motion.peak = m; }
+    } else {
+      motion.peak = Math.max(motion.peak, m);
+      if (now - motion.t0 > 90) {          // swing window over: classify by its peak
+        motion.tracking = false; motion.cool = now + 380;
+        swung(motion.peak);
+      }
+    }
+  }
+  function swung(peak) {
+    const s = peak >= SMASH_AT ? 'smash' : peak >= LOB_AT ? 'lob' : 'drop';
+    conn.send({ t: 'in', k: 'shot', s });
+    buzz(s === 'smash' ? 40 : 20);
+    if (motion.ui) motion.ui(s, peak);
+  }
+  async function enableMotion() {
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        if ((await DeviceMotionEvent.requestPermission()) !== 'granted') return 'denied';
+      }
+    } catch { return 'denied'; }
+    if (!motion.listening) { addEventListener('devicemotion', onMotion); motion.listening = true; }
+    motion.on = true; motion.got = false;
+    await new Promise((r) => setTimeout(r, 1200));
+    return motion.got ? 'ok' : 'nosensor';
+  }
+
   function badminton(v) {
     const score = h('div', { class: 'bdscore' });
     const status = h('div', { class: 'bdstatus' });
@@ -157,14 +201,48 @@
       class: 'shotbtn', style: { '--c': col },
       onpointerdown: (e) => { e.preventDefault(); conn.send({ t: 'in', k: 'shot', s }); buzz(14); },
     }, h('b', null, label), h('small', null, hint));
+    const buttons = h('div', { class: 'shots' },
+      shot('lob', 'Lob', 'high and deep', '#4cc9f0'),
+      shot('drop', 'Drop', 'soft by the net', '#b8f35a'),
+      shot('smash', 'Smash', 'fast and hard', '#ff5d73'));
 
-    return frame(v, [
-      score, status, pad,
-      h('div', { class: 'shots' },
-        shot('lob', 'Lob', 'high and deep', '#4cc9f0'),
-        shot('drop', 'Drop', 'soft by the net', '#b8f35a'),
-        shot('smash', 'Smash', 'fast and hard', '#ff5d73')),
-    ], 'bdframe');
+    // swing zone: shown instead of the buttons once motion controls are on
+    const swingText = h('b', null, 'Swing your phone like a racket');
+    const meter = h('i', { class: 'meterfill' });
+    const swing = h('div', { class: 'swingzone' }, swingText, h('div', { class: 'meter' }, meter),
+      h('small', null, 'Soft flick = drop, swing = lob, hard swing = smash'));
+    const note = h('p', { class: 'motionnote' });
+    const modeBtn = h('button', { class: 'modebtn' }, '');
+    const slot = h('div', { class: 'shotslot' });
+    const paint = () => {
+      slot.replaceChildren(motion.on ? swing : buttons);
+      modeBtn.textContent = motion.on ? 'Use buttons instead' : 'Use motion controls';
+      if (motion.on) {
+        motion.ui = (s, peak) => {
+          swingText.textContent = s.toUpperCase() + '!';
+          meter.style.width = Math.min(100, (peak / 50) * 100) + '%';
+          swing.classList.remove('hit'); void swing.offsetWidth; swing.classList.add('hit');
+        };
+      } else motion.ui = null;
+    };
+    modeBtn.addEventListener('click', async () => {
+      if (motion.on) { motion.on = false; note.textContent = ''; paint(); return; }
+      if (!window.isSecureContext) {
+        note.textContent = 'Phone sensors only work on a secure link (https). See the README: run "npm run start:https" or use a tunnel.';
+        return;
+      }
+      note.textContent = 'Checking motion sensor...';
+      const r = await enableMotion();
+      if (r === 'ok') { note.textContent = ''; ls.set('ca:motion', '1'); paint(); }
+      else {
+        motion.on = false;
+        note.textContent = r === 'denied' ? 'Motion permission was denied. Allow it in the browser settings and try again.'
+          : 'No motion data received. Use the buttons, or try another browser.';
+      }
+    });
+    paint();
+
+    return frame(v, [score, status, pad, slot, modeBtn, note], 'bdframe');
   }
 
   function matchOver(v) {

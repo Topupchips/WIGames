@@ -3,6 +3,7 @@
 // everything over WebSockets. All game logic lives on the server (games.js).
 
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -12,6 +13,7 @@ const QRCode = require('qrcode');
 const { GAMES, byId } = require('./games');
 
 const PORT = Number(process.env.PORT) || 3000;
+const USE_HTTPS = process.argv.includes('--https') || process.env.HTTPS === '1';
 const PUB = path.join(__dirname, 'public');
 const MAX_PLAYERS = 4;
 const POINTS = [5, 3, 2, 1];
@@ -41,14 +43,14 @@ function baseUrl(req) {
   const host = req.headers.host || `localhost:${PORT}`;
   const name = host.replace(/:\d+$/, '');
   if (name === 'localhost' || name === '127.0.0.1' || name === '[::1]') {
-    return `http://${lanIP()}:${PORT}`;
+    return `${USE_HTTPS ? 'https' : 'http'}://${lanIP()}:${PORT}`;
   }
   const proto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
   return `${proto}://${host}`;
 }
 
 // ---------- HTTP ----------
-const server = http.createServer((req, res) => {
+function handler(req, res) {
   let p;
   try {
     p = decodeURIComponent(req.url.split('?')[0]);
@@ -75,7 +77,7 @@ const server = http.createServer((req, res) => {
     });
     res.end(data);
   });
-});
+}
 
 // ---------- Rooms ----------
 const rooms = new Map();
@@ -266,45 +268,65 @@ function onMessage(ws, m, req) {
   }
 }
 
-// ---------- WebSocket ----------
-const wss = new WebSocketServer({ server });
-wss.on('connection', (ws, req) => {
-  ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
-  ws.on('message', (raw) => {
-    let m;
-    try { m = JSON.parse(raw); } catch { return; }
-    Promise.resolve(onMessage(ws, m, req)).catch((e) => console.error(e));
-  });
-  ws.on('close', () => {
-    const c = ws.ctx;
-    if (!c) return;
-    if (c.role === 'host' && c.room.host === ws) c.room.host = null;
-    if (c.role === 'screen') c.room.screens.delete(ws);
-    if (c.role === 'player') {
-      const p = c.room.players.find((x) => x.id === c.pid);
-      if (p && p.ws === ws) {
-        p.ws = null;
-        pushAll(c.room);
+async function main() {
+  let server;
+  if (USE_HTTPS) {
+    // Self-signed certificate so phones get a secure context (needed for motion sensors).
+    const selfsigned = require('selfsigned');
+    const pems = await selfsigned.generate([{ name: 'commonName', value: 'badminton.local' }], {
+      days: 365,
+      extensions: [{ name: 'subjectAltName', altNames: [
+        { type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }, { type: 7, ip: lanIP() },
+      ] }],
+    });
+    server = https.createServer({ key: pems.private, cert: pems.cert }, handler);
+  } else {
+    server = http.createServer(handler);
+  }
+  const wss = new WebSocketServer({ server });
+  // ---------- WebSocket ----------
+
+  wss.on('connection', (ws, req) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+    ws.on('message', (raw) => {
+      let m;
+      try { m = JSON.parse(raw); } catch { return; }
+      Promise.resolve(onMessage(ws, m, req)).catch((e) => console.error(e));
+    });
+    ws.on('close', () => {
+      const c = ws.ctx;
+      if (!c) return;
+      if (c.role === 'host' && c.room.host === ws) c.room.host = null;
+      if (c.role === 'screen') c.room.screens.delete(ws);
+      if (c.role === 'player') {
+        const p = c.room.players.find((x) => x.id === c.pid);
+        if (p && p.ws === ws) {
+          p.ws = null;
+          pushAll(c.room);
+        }
       }
-    }
+    });
   });
-});
 
-setInterval(() => {
-  for (const ws of wss.clients) {
-    if (!ws.isAlive) { ws.terminate(); continue; }
-    ws.isAlive = false;
-    ws.ping();
-  }
-  for (const [code, room] of rooms) {
-    const empty = !room.host && !room.players.some((p) => p.ws);
-    if (empty && Date.now() - room.lastActive > 30 * 60 * 1000) rooms.delete(code);
-  }
-}, 25000).unref();
+  setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!ws.isAlive) { ws.terminate(); continue; }
+      ws.isAlive = false;
+      ws.ping();
+    }
+    for (const [code, room] of rooms) {
+      const empty = !room.host && !room.players.some((p) => p.ws);
+      if (empty && Date.now() - room.lastActive > 30 * 60 * 1000) rooms.delete(code);
+    }
+  }, 25000).unref();
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('\n  Couch Arcade is running\n');
-  console.log(`  Open on your monitor:  http://localhost:${PORT}`);
-  console.log(`  Phones join via QR (same Wi-Fi), or visit http://${lanIP()}:${PORT}/play\n`);
-});
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log('\n  Badminton Night is running\n');
+    const proto = USE_HTTPS ? 'https' : 'http';
+    console.log(`  Open on your monitor:  ${proto}://localhost:${PORT}`);
+    console.log(`  Phones join via QR (same Wi-Fi), or visit ${proto}://${lanIP()}:${PORT}/play\n`);
+  });
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });
